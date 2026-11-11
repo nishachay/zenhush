@@ -1,7 +1,8 @@
-# PyInstaller spec for dither. TEMPLATE: Linux binary built and smoke-tested
-# locally; Windows/macOS binaries need their OS runners (see build.yml).
-# Build per OS on that OS's runner: pyinstaller packaging/dither.spec
-# Produces dist/dither (or dither.exe), one-file, windowed (no console).
+# PyInstaller spec for dither. One-directory layout so the bundled LGPL
+# libraries (Qt, FFmpeg) are directly replaceable files under _internal/.
+# Linux build tested on Ubuntu 22.04; Windows/macOS binaries need their OS
+# runners (see build.yml). Build per OS on that OS's runner:
+# pyinstaller packaging/dither.spec -> dist/dither/ directory, windowed.
 
 import os
 
@@ -23,12 +24,20 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
+    [],
+    exclude_binaries=True,
     name='dither',
     debug=False,
     strip=False,
     upx=False,
     console=False,
     icon=os.path.join(ROOT, 'dither_app/assets/icon.png'),
+)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name='dither',
 )

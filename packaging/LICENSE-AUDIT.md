@@ -37,9 +37,17 @@ no distribution has happened.
 - `libxcb-cursor0` on X11 (Debian/Ubuntu package name); the app does not
   start on X11 without it
 
+## What the test package ships (shipped 12 Nov 2026)
+- One-directory PyInstaller build: Qt/FFmpeg shared libraries are
+  directly replaceable files in dither/_internal/.
+- Full license texts (GPL-3.0, LGPL-3.0, LGPL-2.1, PSF, PyInstaller),
+  THIRD_PARTY_NOTICES.md, and WRITTEN_OFFER.txt with upstream
+  corresponding-source URLs verified live, plus a 3-year written offer.
+- dither's own source included under source/ (private share, no public
+  license selected yet).
+
 ## Gaps to close before public release
 1. Pick a LICENSE for the project's own code.
-2. Ship license notices: LGPL texts, Qt + FFmpeg attribution, PSF notice.
-3. Trademark clearance for the name "dither" (not done - see brand File).
-4. Windows/macOS binaries are not built; no claims until CI or real
+2. Trademark clearance for the name "dither" (not done - see brand File).
+3. Windows/macOS binaries are not built; no claims until CI or real
    machines run the test suites there.

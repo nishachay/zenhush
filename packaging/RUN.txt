@@ -3,7 +3,7 @@ dither - Linux test build (private, not for public distribution)
 What this is
   dither: a tiny noise machine for your top bar. Tray icon + popup with
   5 synthesized sounds (brown, white, pink, rain, ocean), volume, sleep
-  timer, restart. One-file binary, nothing to install.
+  timer, restart. One-directory build, nothing to install.
 
 Tested environment (what this build was actually verified on)
   - Ubuntu 22.04.5 LTS, x86_64, glibc 2.35
@@ -28,17 +28,21 @@ Runtime dependencies
   - Audio output: PulseAudio or PipeWire (pulse API).
 
 Run
-  chmod +x dither
-  ./dither
+  chmod +x dither/dither
+  ./dither/dither
   Click the tray icon (or use the fallback window) and pick a sound.
+  The dither/ directory must stay together: dither/dither loads its
+  bundled libraries from dither/_internal/.
 
 Third-party components and licenses
-  This binary bundles Qt 6.12.0 (LGPL v3) and FFmpeg 9.0.1 (LGPL v2.1+),
+  This build bundles Qt 6.12.0 (LGPL v3) and FFmpeg 9.0.1 (LGPL v2.1+)
+  as ordinary shared-library files under dither/_internal/ (replaceable),
   plus a Python 3.10 runtime (PSF) and the PyInstaller bootloader.
-  See THIRD_PARTY_NOTICES.md and the licenses/ directory for the full
-  texts and how to replace the LGPL libraries. These materials are
-  included because sharing this binary triggers those obligations;
-  a private test share is not an exemption.
+  See THIRD_PARTY_NOTICES.md, WRITTEN_OFFER.txt (corresponding source,
+  verified upstream URLs + formal written offer) and licenses/ for the
+  full texts. These materials ship because conveying the binary triggers
+  those obligations; a private test share is not an exemption.
+  dither's own source is included under source/.
 
 Status
   Private test build. Test totals: 25 audio-engine checks + 26 UI checks
