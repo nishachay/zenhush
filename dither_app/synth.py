@@ -25,6 +25,9 @@ from PySide6.QtCore import QIODevice
 
 SAMPLE_RATE = 44100
 
+# Peak safety knee: untouched below this, softly rounded above.
+PEAK_KNEE = 0.89
+
 # Per-recipe loudness: measured output RMS at default Depth/Rumble varies
 # widely, so each recipe gets a gain that lands it near TARGET_RMS, like the
 # original offline renderer's normalization. The values are then trimmed by
@@ -41,8 +44,11 @@ RMS_SCALE = 12.0
 # Gain staging, faithful to the preview's Web Audio chain: everything runs in
 # float, the rumble lowshelf boosts absolutely (more rumble = more low end,
 # never less volume), depth is a plain lowpass, and volume is the last gain
-# before the output. Like a DAC, the only clip point is the final conversion;
-# at the default Volume 70 (gain 0.44) even maxed Depth+Rumble stay clean.
+# before the output. The final stage is a transparent peak safety: below
+# 0.89 (-1 dBFS) samples pass through untouched (it never engages at or
+# below the default volume, measured across all sounds/settings); above it
+# a soft knee rounds peaks toward full scale, so no slider combination can
+# produce harsh digital clipping.
 CHANNELS = 1  # mono: lightest CPU, indistinguishable for shaped noise
 _CHUNK = 661  # ~15 ms at 44.1 kHz, matches the visualizer window
 
@@ -160,6 +166,8 @@ class LiveSource(QIODevice):
         self._rms_ring = deque(maxlen=64)
         self._rms_acc = 0.0
         self._rms_n = 0
+        self.knee_samples = 0     # samples that entered the soft knee
+        self.limited_samples = 0  # samples that would have clipped without it
         self.open(QIODevice.ReadOnly)
 
     @staticmethod
@@ -233,6 +241,8 @@ class LiveSource(QIODevice):
         rumble_g = self._rumble_gain
         rumble_s = self._rumble_state
         nxt = voice.next
+        limited = 0
+        kneed = 0
         vol = self._volume
         vol_t = self._volume_target
         vol_step = (vol_t - vol) / max(1, min(n, 882))  # ~20 ms ramp
@@ -255,10 +265,16 @@ class LiveSource(QIODevice):
             if fade > 0:
                 v *= (fade_total - fade) / fade_total
                 fade -= 1
-            if v > 1.0:
-                v = 1.0
-            elif v < -1.0:
-                v = -1.0
+            if v > 0.89:
+                kneed += 1
+                if v > 1.0:
+                    limited += 1
+                v = 0.89 + 0.11 * math.tanh((v - 0.89) / 0.11)
+            elif v < -0.89:
+                kneed += 1
+                if v < -1.0:
+                    limited += 1
+                v = -0.89 - 0.11 * math.tanh((-v - 0.89) / 0.11)
             buf[i] = int(v * 32767)
             acc += v * v
             cnt += 1
@@ -270,6 +286,8 @@ class LiveSource(QIODevice):
         self._rumble_state = rumble_s
         self._volume = vol
         self._fade_left = fade
+        self.knee_samples += kneed
+        self.limited_samples += limited
         self._rms_acc = acc
         self._rms_n = cnt
         return buf.tobytes()

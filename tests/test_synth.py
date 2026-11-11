@@ -112,21 +112,37 @@ db100 = 20 * math.log10(low_band_db(100) / base)
 check("rumble 58 boosts lows by ~+4 dB", 3.0 < db58 < 5.5, f"{db58:+.1f} dB")
 check("rumble 100 boosts lows by ~+12 dB", 10.5 < db100 < 15.0, f"{db100:+.1f} dB")
 
-# 5b. Gain staging: no clipping at or below default volume, any sound,
-# any filter setting, across seeds (vol 100 + rumble 100 may clip, as a DAC would)
-def worst_peak(sound, vol, seeds=3):
-    worst = 0.0
+# 5b. Gain staging: transparent below the knee at defaults, and NO harsh
+# clipping at ANY valid slider combination - the peak safety rounds peaks
+# softly, so samples never flatline at full scale even at max everything.
+def matrix_run(sound, vol, seeds=3):
+    """(max |sample|, knee engagements, would-have-clipped, longest full-scale run)"""
+    peak = knee = limited = longest = 0
     for _ in range(seeds):
         for depth in (0, 65, 100):
             for rumble in (0, 58, 100):
                 s = synth.LiveSource(sound)
                 s.set_depth(depth); s.set_rumble(rumble); s.set_volume(vol)
                 d = samples(grab(s, 1))
-                worst = max(worst, max(abs(x) for x in d) / 32767)
-    return worst
+                peak = max(peak, max(abs(x) for x in d) / 32767)
+                knee += s.knee_samples
+                limited += s.limited_samples
+                run = best = 0
+                for x in d:
+                    run = run + 1 if abs(x) >= 32767 else 0
+                    best = max(best, run)
+                longest = max(longest, best)
+    return peak, knee, limited, longest
+
 for name in ("brown", "white", "pink", "rain", "ocean"):
-    w = worst_peak(name, 70)
-    check(f"{name}: clean at default volume across all settings", w < 0.99, f"peak {w:.2f}")
+    peak, knee, limited, longest = matrix_run(name, 70)
+    check(f"{name}: peak safety never engages at or below default volume",
+          peak < 0.96 and knee == 0 and limited == 0, f"peak {peak:.2f}, knee {knee}")
+for name in ("brown", "white", "pink", "rain", "ocean"):
+    peak, knee, limited, longest = matrix_run(name, 100)
+    check(f"{name}: no harsh clipping even at max volume",
+          peak <= 1.0 and longest <= 3,
+          f"peak {peak:.2f}, knee {knee} samples, would-clip {limited}, longest flatline {longest}")
 
 # 6. Every sound generates distinct, healthy noise
 for name in ("white", "pink", "rain", "ocean"):
