@@ -36,7 +36,7 @@ OUTPUT_GAIN = {"brown": 0.09 * HEADROOM, "white": 1.43 * HEADROOM,
                "pink": 0.41 * HEADROOM, "rain": 0.66 * HEADROOM,
                "ocean": 0.12 * HEADROOM}
 # Visualizer: normalized output breathes around 0.7 on the bars.
-RMS_SCALE = 8.0
+RMS_SCALE = 12.0
 
 # Gain staging, faithful to the preview's Web Audio chain: everything runs in
 # float, the rumble lowshelf boosts absolutely (more rumble = more low end,
