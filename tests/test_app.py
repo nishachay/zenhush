@@ -13,10 +13,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
-from PySide6.QtMultimedia import QMediaPlayer
 
 from dither_app import noise_gen
-from dither_app.app import (CACHE_DIR, THEMES, TIMER_CHOICES, PlayButton,
+from dither_app import synth
+from dither_app.app import (CACHE_DIR, THEMES, TIMER_CHOICES, EqWidget, PlayButton,
                             Popup, Player, app_font_family, contrast_ratio)
 
 FAILURES = []
@@ -62,14 +62,8 @@ def main():
     # Play the selected sound
     popup._toggle_play()
     check("play starts selected sound", player.current == "brown" and popup.is_playing)
-    wav = os.path.join(CACHE_DIR, "brown.wav")
-    check("brown.wav rendered to cache", os.path.exists(wav) and os.path.getsize(wav) > 100000,
-          f"{os.path.getsize(wav) if os.path.exists(wav) else 0} bytes")
-    app.processEvents()
-    state = player.media.playbackState()
-    check("playback requested (playing or loading)",
-          state in (QMediaPlayer.PlaybackState.PlayingState,) or player.media.mediaStatus() != QMediaPlayer.MediaStatus.NoMedia,
-          f"state={state}")
+    check("no audio file is played: live synthesis drives the sink",
+          not hasattr(player, "media") and player._started and player.source is not None)
     check("play button shows pause mode", popup.play_button.mode == "pause")
     check("status shows Live while playing", popup.eq.status_text == "Live")
     check("eq animates while playing", popup.eq.timer.isActive())
@@ -82,7 +76,7 @@ def main():
     popup._toggle_play()
     check("toggle pauses", popup.play_button.mode == "play" and not player.playing)
     check("eq stops animating when paused", not popup.eq.timer.isActive())
-    check("status clears when paused", popup.eq.status_text == "")
+    check("status shows Paused when paused", popup.eq.status_text == "Paused")
     popup._toggle_play()
     check("toggle resumes", popup.play_button.mode == "pause")
 
@@ -92,8 +86,16 @@ def main():
     check("restart no-op before first play", not fresh.is_playing and fresh.eq.elapsed_text == "0:00")
 
     # Volume
+    recorded = []
+    real_set_volume = player.sink.setVolume
+    player.sink.setVolume = recorded.append  # offscreen sink swallows volume
     popup.volume.setValue(35)
-    check("volume applied to output", abs(player.output.volume() - 0.35) < 1e-6, f"{player.output.volume()}")
+    player.sink.setVolume = real_set_volume
+    expected = synth.volume_gain(35)
+    check("volume applied to output", recorded and abs(recorded[-1] - expected) < 1e-6,
+          f"{recorded[-1] if recorded else 'never called'} vs {expected}")
+    check("preview default volume 70 maps to gain 0.44",
+          abs(synth.volume_gain(70) - 0.441) < 0.005, f"{synth.volume_gain(70)}")
 
     # Sleep timer arming and countdown
     idx = next(i for i, (_, m) in enumerate(TIMER_CHOICES) if m == 15)
@@ -128,8 +130,14 @@ def main():
     popup._sleep_expired()
     check("sleep expiry stops elapsed timer", not popup.elapsed_timer.isActive())
 
-    # EQ animation ticks change bars only while playing
+    # EQ animation ticks change bars only while playing: the bars are fed
+    # by the synthesis engine's real recent output energy.
     popup._toggle_play()
+    vals = [0.3] * 12
+    def fake_source():
+        vals[0] = 0.9 - vals[0]  # alternate loud/quiet so ticks visibly move
+        return tuple(vals)
+    popup.eq.source = fake_source
     before = list(popup.eq.heights)
     for _ in range(4):
         popup.eq._tick()
@@ -145,6 +153,60 @@ def main():
     check("settings disclosure expands popup", popup.height() == h0 + Popup.SETTINGS_HEIGHT)
     popup.settings_button.setChecked(False)
     check("settings collapse restores height", popup.height() == h0)
+
+    # Live bars: real energy from the synthesis engine, not decoration
+    live = synth.LiveSource("brown")
+    live.readData(44100 * 2)  # one second of fresh noise
+    ring = live.rms_values()
+    check("engine reports real output energy", len(ring) > 12 and any(v > 0.2 for v in ring),
+          f"{len(ring)} values")
+    popup.eq.source = live.rms_values
+    popup.eq.set_playing(True)
+    popup.eq.heights = [0.0] * popup.eq.BAR_COUNT
+    for _ in range(30):
+        popup.eq._tick()
+    engine_heights = list(popup.eq.heights)
+    window_mean = sum(live.rms_values()[-12:]) / 12
+    check("bars track real engine energy",
+          sum(engine_heights) > 3 and abs(sum(engine_heights) / 12 - window_mean) < 0.3,
+          f"bars {sum(engine_heights)/12:.2f} vs signal {window_mean:.2f}")
+    quiet = synth.LiveSource("white")
+    quiet.readData(44100 * 2)
+    popup.eq.source = lambda: tuple(v * 0.1 for v in quiet.rms_values())
+    for _ in range(40):
+        popup.eq._tick()
+    check("bars fall when the signal is quiet",
+          sum(popup.eq.heights) < sum(engine_heights) * 0.7,
+          f"{sum(popup.eq.heights):.2f} vs {sum(engine_heights):.2f}")
+    frozen = list(popup.eq.heights)
+    popup.eq.set_playing(False)
+    check("pause freezes the real energy", popup.eq.heights == frozen
+          and popup.eq.heights != list(EqWidget.IDLE_HEIGHTS))
+    popup.eq.source = None
+    popup.eq.set_playing(True); popup.eq.set_playing(False)
+
+    # Custom settings controls: segmented + toggle behave like the combos they replaced
+    from dither_app.app import Segmented, Toggle
+    check("sleep timer is a segmented control", isinstance(popup.timer_box, Segmented))
+    check("appearance is a segmented control", isinstance(popup.theme_box, Segmented))
+    check("reduce motion is a toggle", isinstance(popup.motion_box, Toggle))
+    popup.timer_box.setCurrentIndex(2)
+    check("segmented selection lands", popup.timer_box.currentIndex() == 2
+          and popup.timer_box.currentText() == "30 min")
+    for _ in range(20):
+        app.processEvents()
+    import time as _t
+    _t.sleep(0.25)
+    for _ in range(20):
+        app.processEvents()
+    check("segmented thumb settles under selection",
+          abs(popup.timer_box._pos - 2.0) < 1e-6, f"{popup.timer_box._pos}")
+    popup.timer_box.setCurrentIndex(0)
+    popup.motion_box.setCurrentIndex(1)
+    check("toggle turns on", popup.motion_box.currentIndex() == 1
+          and popup.motion_box.currentText() == "On" and popup.reduce_motion)
+    popup.motion_box.setCurrentIndex(0)
+    check("toggle turns off", not popup.reduce_motion)
 
     # Themes: both exist, switching applies, measured contrast passes
     check("both themes defined", set(THEMES) == {"light", "dark"})

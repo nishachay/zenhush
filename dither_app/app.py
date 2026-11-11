@@ -5,25 +5,25 @@ with a compact popup that plays locally synthesized noise. All audio is
 generated on the device by noise_gen; nothing is downloaded.
 
 UI direction follows the user's reference: a rounded card with an inset
-equalizer panel (elapsed / Live), sound title + subtitle, one large
+equalizer panel (elapsed / playback status), sound title + subtitle, one large
 filled play button, restart and settings beside it, in light and dark.
 """
 import math
 import os
 import sys
 
-from PySide6.QtCore import (QEasingCurve, QPoint, QPointF, QRectF, QSize, Qt, QTimer,
-                            QUrl, QPropertyAnimation, Property)
+from PySide6.QtCore import (QEasingCurve, QPoint, QPointF, QRectF, QSize, Qt,
+                            QTimer, QPropertyAnimation, Property, Signal)
 from PySide6.QtGui import (QAction, QBrush, QColor, QCursor, QFont,
                            QFontDatabase, QGuiApplication, QIcon, QPainter,
                            QPainterPath, QPen, QPixmap)
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimedia import QAudio, QAudioFormat, QAudioSink
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel,
-                               QMenu, QPushButton, QSlider, QSystemTrayIcon,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel,
+                               QMenu, QPushButton, QSlider, QSizePolicy,
+                               QSystemTrayIcon, QVBoxLayout, QWidget)
 
-from . import noise_gen
+from . import noise_gen, synth
 
 ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "dither")
@@ -139,12 +139,266 @@ def _pixmap(kind, color, size=64, icon_ratio=0.42):
     return pm
 
 
-class EqWidget(QWidget):
-    """Inset panel: animated bars, elapsed time, live/sleep status.
 
-    The bar animation is decorative (a smooth random walk, not an audio
-    spectrum measurement); it only runs while playing, and never under
-    reduce-motion. Elapsed and status text are always static truth.
+class Segmented(QWidget):
+    """Pill segmented control with a sliding thumb (timer/appearance rows).
+
+    QComboBox-compatible surface: addItem/itemText/itemData/currentText/
+    currentIndex/setCurrentIndex/count + currentIndexChanged, so callers and
+    tests read the same either way. Keyboard: arrows/Home/End; ring on focus.
+    """
+
+    currentIndexChanged = Signal(int)
+
+    def __init__(self, theme, accessible_name):
+        super().__init__()
+        self.theme = theme
+        self._items = []        # (label, data, display)
+        self._index = -1
+        self._pos = 0.0         # thumb position in segment units (animated)
+        self._hover = -1
+        self.reduce_motion = False
+        self._anim = QPropertyAnimation(self, b"thumb_pos", self)
+        self._anim.setDuration(160)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.setAccessibleName(accessible_name)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setFixedHeight(28)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setAttribute(Qt.WA_Hover)
+
+    # combo-compatible API
+    def addItem(self, label, data=None, short=None):
+        self._items.append((label, data, short or label))
+        if self._index == -1:
+            self.setCurrentIndex(0)
+
+    def count(self):
+        return len(self._items)
+
+    def itemText(self, i):
+        return self._items[i][0]
+
+    def itemData(self, i):
+        return self._items[i][1]
+
+    def currentText(self):
+        return self._items[self._index][0] if 0 <= self._index < len(self._items) else ""
+
+    def currentIndex(self):
+        return self._index
+
+    def setCurrentIndex(self, i):
+        if i == self._index or not (0 <= i < len(self._items)):
+            return
+        old = self._index
+        self._index = i
+        self._anim.stop()
+        if self.reduce_motion or old == -1:
+            self._pos = float(i)
+            self.update()
+        else:
+            self._anim.setStartValue(self._pos)
+            self._anim.setEndValue(float(i))
+            self._anim.start()
+        self.currentIndexChanged.emit(i)
+
+    def get_thumb(self):
+        return self._pos
+
+    def set_thumb(self, v):
+        self._pos = v
+        self.update()
+
+    thumb_pos = Property(float, get_thumb, set_thumb)
+
+    def set_theme(self, theme):
+        self.theme = theme
+        self.update()
+
+    # events
+    def _seg_at(self, x):
+        return min(max(int(x // (self.width() / max(1, len(self._items)))), 0),
+                   len(self._items) - 1)
+
+    def mousePressEvent(self, e):
+        self.setFocus()
+        self.setCurrentIndex(self._seg_at(e.position().x()))
+
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key_Left, Qt.Key_Down):
+            self.setCurrentIndex(max(0, self._index - 1))
+        elif e.key() in (Qt.Key_Right, Qt.Key_Up):
+            self.setCurrentIndex(min(len(self._items) - 1, self._index + 1))
+        elif e.key() == Qt.Key_Home:
+            self.setCurrentIndex(0)
+        elif e.key() == Qt.Key_End:
+            self.setCurrentIndex(len(self._items) - 1)
+        else:
+            super().keyPressEvent(e)
+
+    def hoverMoveEvent(self, e):
+        i = self._seg_at(e.position().x())
+        if i != self._hover:
+            self._hover = i
+            self.update()
+
+    def leaveEvent(self, e):
+        self._hover = -1
+        self.update()
+
+    def event(self, e):
+        if e.type() == e.Type.HoverMove:
+            self.hoverMoveEvent(e)
+        return super().event(e)
+
+    def paintEvent(self, e):
+        t = self.theme
+        n = max(1, len(self._items))
+        w, h = self.width(), self.height()
+        seg = w / n
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(self.rect(), Qt.transparent)
+        # track
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(t["field"]))
+        p.drawRoundedRect(0, 0, w, h, h / 2, h / 2)
+        # thumb
+        inset = 3
+        tx = self._pos * seg + inset
+        p.setBrush(QColor(t["card"]))
+        p.setPen(QPen(QColor(*t["edge"]), 1))
+        p.drawRoundedRect(QRectF(tx, inset, seg - 2 * inset, h - 2 * inset),
+                          (h - 2 * inset) / 2, (h - 2 * inset) / 2)
+        # labels
+        f = QFont(self.font())
+        f.setPixelSize(12)
+        p.setFont(f)
+        for i, (_, _, disp) in enumerate(self._items):
+            if i == self._index:
+                p.setPen(QColor(t["text"]))
+            elif i == self._hover:
+                p.setPen(QColor(t["text"]))
+            else:
+                p.setPen(QColor(t["subtext"]))
+            p.drawText(QRectF(i * seg, 0, seg, h), Qt.AlignCenter, disp)
+        # focus ring
+        if self.hasFocus():
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(t["accent_text"]), 2))
+            p.drawRoundedRect(1, 1, w - 2, h - 2, h / 2, h / 2)
+        p.end()
+
+
+class Toggle(QWidget):
+    """Slide switch (reduce motion row). Combo-compatible: Off=0, On=1."""
+
+    currentIndexChanged = Signal(int)
+
+    def __init__(self, theme, accessible_name):
+        super().__init__()
+        self.theme = theme
+        self._labels = []
+        self._index = 0
+        self._pos = 0.0
+        self.reduce_motion = False
+        self._anim = QPropertyAnimation(self, b"knob_pos", self)
+        self._anim.setDuration(140)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.setAccessibleName(accessible_name)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setFixedSize(44, 26)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def addItem(self, label):
+        self._labels.append(label)
+
+    def currentText(self):
+        return self._labels[self._index] if self._labels else ""
+
+    def currentIndex(self):
+        return self._index
+
+    def setCurrentIndex(self, i):
+        if i == self._index:
+            return
+        self._index = i
+        self._anim.stop()
+        if self.reduce_motion:
+            self._pos = float(i)
+            self.update()
+        else:
+            self._anim.setStartValue(self._pos)
+            self._anim.setEndValue(float(i))
+            self._anim.start()
+        self.currentIndexChanged.emit(i)
+
+    def get_knob(self):
+        return self._pos
+
+    def set_knob(self, v):
+        self._pos = v
+        self.update()
+
+    knob_pos = Property(float, get_knob, set_knob)
+
+    def set_theme(self, theme):
+        self.theme = theme
+        self.update()
+
+    def mousePressEvent(self, e):
+        self.setFocus()
+        self.setCurrentIndex(1 - self._index)
+
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter):
+            self.setCurrentIndex(1 - self._index)
+        elif e.key() == Qt.Key_Left:
+            self.setCurrentIndex(0)
+        elif e.key() == Qt.Key_Right:
+            self.setCurrentIndex(1)
+        else:
+            super().keyPressEvent(e)
+
+    def paintEvent(self, e):
+        t = self.theme
+        w, h = self.width(), self.height()
+        on = self._pos
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        # track: field -> accent blend
+        off_c, on_c = QColor(t["outline"]), QColor(t["accent"])
+        track = QColor(
+            int(off_c.red() + (on_c.red() - off_c.red()) * on),
+            int(off_c.green() + (on_c.green() - off_c.green()) * on),
+            int(off_c.blue() + (on_c.blue() - off_c.blue()) * on))
+        p.setPen(Qt.NoPen)
+        p.setBrush(track)
+        p.drawRoundedRect(2, 2, w - 4, h - 4, (h - 4) / 2, (h - 4) / 2)
+        # knob
+        knob_d = h - 10
+        travel = (w - 4) - knob_d - 4
+        kx = 2 + 2 + self._pos * travel
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawEllipse(QRectF(kx, 5, knob_d, knob_d))
+        # focus ring
+        if self.hasFocus():
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(t["accent_text"]), 2))
+            p.drawRoundedRect(0, 0, w - 1, h - 1, h / 2, h / 2)
+        p.end()
+
+
+class EqWidget(QWidget):
+    """Inset panel: live bars, elapsed time, playback/sleep status.
+
+    The bars are a real time-domain energy envelope of the sound being
+    played, streamed straight from the synthesis engine's output energy
+    (synth.LiveSource.rms_values). It is not a spectrum analysis and it is
+    not decorative: paused freezes the actual recent energy. Under
+    reduce-motion a single static frame is drawn instead of animating.
     """
 
     BAR_COUNT = 12
@@ -162,12 +416,10 @@ class EqWidget(QWidget):
         self.status_text = ""
         self.animating = False
         self.reduce_motion = False
-        self._tick_count = 0
+        self.source = None  # callable -> recent real output RMS values
         self.timer = QTimer(self)
         self.timer.setInterval(80)
         self.timer.timeout.connect(self._tick)
-        import random as _random
-        self._rng = _random.Random(7)
 
     def _cache_colors(self):
         # Prebuild paint objects: hot-path enum/color churn under CPython 3.10
@@ -183,12 +435,12 @@ class EqWidget(QWidget):
 
     def set_playing(self, playing):
         self.animating = playing
+        self.timer.stop()
         if playing and not self.reduce_motion:
             self.timer.start()
-        else:
-            self.timer.stop()
-            if not playing:
-                self.heights = list(self.IDLE_HEIGHTS)
+        elif playing:
+            self._tick()  # reduce motion: one static real frame
+        # paused: keep the current bars - the frozen energy at the pause point
         self.update()
 
     def set_reduce_motion(self, on):
@@ -196,13 +448,18 @@ class EqWidget(QWidget):
         self.set_playing(self.animating)
 
     def _tick(self):
-        self._tick_count += 1
-        for i in range(self.BAR_COUNT):
-            if self._rng.random() < 0.25:
-                self.targets[i] = 0.25 + self._rng.random() * 0.75
-            self.heights[i] += (self.targets[i] - self.heights[i]) * 0.25
-        if self._tick_count % 6 == 0:
-            self.accent_index = (self.accent_index + 1) % self.BAR_COUNT
+        if self.source:
+            vals = list(self.source())
+            if vals:
+                take = vals[-self.BAR_COUNT:]
+                window = [take[0]] * (self.BAR_COUNT - len(take)) + take
+                loudest, loudest_v = self.accent_index, -1.0
+                for i, v in enumerate(window):
+                    self.targets[i] = v
+                    self.heights[i] += (v - self.heights[i]) * 0.45
+                    if self.heights[i] > loudest_v:
+                        loudest, loudest_v = i, self.heights[i]
+                self.accent_index = loudest  # accent marks the loudest bar
         self.update()
 
     def paintEvent(self, event):
@@ -316,42 +573,68 @@ class PlayButton(QPushButton):
 
 
 class Player:
-    """Gapless looping playback of locally synthesized sounds."""
+    """Continuous live synthesis streamed to the speakers.
+
+    No audio file is ever played: LiveSource generates fresh filtered
+    random noise forever and QAudioSink pulls it in real time, so the
+    sound is made right now, never ends and never repeats. Volume,
+    Depth and Rumble retune the stream live while it plays.
+    """
 
     def __init__(self):
-        self.output = QAudioOutput()
-        self.media = QMediaPlayer()
-        self.media.setAudioOutput(self.output)
-        self.media.setLoops(-1)
-        self.output.setVolume(0.7)
+        fmt = QAudioFormat()
+        fmt.setSampleRate(synth.SAMPLE_RATE)
+        fmt.setChannelCount(synth.CHANNELS)
+        fmt.setSampleFormat(QAudioFormat.Int16)
+        self.source = synth.LiveSource()
+        self.sink = QAudioSink(fmt)
+        self.sink.setVolume(synth.volume_gain(synth.DEFAULT_VOLUME))
+        self._started = False
         self.current = None
 
     def play_sound(self, name):
-        path = noise_gen.ensure_wav(CACHE_DIR, name)
+        self.source.set_sound(name)
         self.current = name
-        self.media.setSource(QUrl.fromLocalFile(path))
-        self.media.play()
+        if not self._started:
+            self.sink.start(self.source)
+            self._started = True
+        self.sink.resume()
 
     def pause(self):
-        self.media.pause()
+        self.sink.suspend()
 
     def resume(self):
         if self.current:
-            self.media.play()
+            self.source.soft_start()
+            self.sink.resume()
+
+    def restart(self):
+        """Fresh noise from a new seed; a restart never replays anything."""
+        self.source.restart()
+        self.sink.resume()
 
     def set_volume(self, value):
-        self.output.setVolume(value)
+        """Slider 0-100, preview-fitted curve: 70 -> gain 0.44."""
+        self.sink.setVolume(synth.volume_gain(value))
+
+    def set_depth(self, value):
+        """Slider 0-100: lowpass cutoff, higher is darker."""
+        self.source.set_depth(value)
+
+    def set_rumble(self, value):
+        """Slider 0-100: sub-bass lowshelf boost."""
+        self.source.set_rumble(value)
 
     @property
     def playing(self):
-        return self.media.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        return self.sink.state() == QAudio.State.ActiveState
 
 
 class Popup(QWidget):
     """The compact control panel, following the user's reference design."""
 
     BASE_HEIGHT = 296
-    SETTINGS_HEIGHT = 128
+    SETTINGS_HEIGHT = 276
 
     def __init__(self, player):
         super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
@@ -432,41 +715,78 @@ class Popup(QWidget):
         # Settings: secondary controls live behind the disclosure.
         self.settings = QWidget()
         s_layout = QVBoxLayout(self.settings)
-        s_layout.setContentsMargins(4, 12, 4, 0)
-        s_layout.setSpacing(10)
-        vol_row = QHBoxLayout()
-        vol_label = QLabel("Volume")
-        vol_row.addWidget(vol_label)
+        s_layout.setContentsMargins(4, 14, 4, 0)
+        s_layout.setSpacing(12)
+
+        def _row(label):
+            row = QHBoxLayout()
+            lab = QLabel(label)
+            row.addWidget(lab)
+            row.addStretch(1)
+            return row
+
+        vol_row = _row("Volume")
         self.volume = QSlider(Qt.Horizontal)
         self.volume.setRange(0, 100)
         self.volume.setValue(70)
         self.volume.setAccessibleName("Volume")
-        self.volume.valueChanged.connect(lambda v: self.player.set_volume(v / 100.0))
-        vol_row.addWidget(self.volume)
+        self.volume.valueChanged.connect(self.player.set_volume)
+        vol_row.addWidget(self.volume, 2)
         s_layout.addLayout(vol_row)
-        timer_row = QHBoxLayout()
-        timer_row.addWidget(QLabel("Sleep timer"))
-        self.timer_box = QComboBox()
+
+        depth_row = _row("Depth")
+        self.depth = QSlider(Qt.Horizontal)
+        self.depth.setRange(0, 100)
+        self.depth.setValue(synth.DEFAULT_DEPTH)
+        self.depth.setAccessibleName("Depth")
+        self.depth.setToolTip("How dark the sound is: higher cuts more highs")
+        self.depth.valueChanged.connect(self.player.set_depth)
+        depth_row.addWidget(self.depth, 2)
+        s_layout.addLayout(depth_row)
+
+        rumble_row = _row("Rumble")
+        self.rumble = QSlider(Qt.Horizontal)
+        self.rumble.setRange(0, 100)
+        self.rumble.setValue(synth.DEFAULT_RUMBLE)
+        self.rumble.setAccessibleName("Rumble")
+        self.rumble.setToolTip("Sub-bass boost")
+        self.rumble.valueChanged.connect(self.player.set_rumble)
+        rumble_row.addWidget(self.rumble, 2)
+        s_layout.addLayout(rumble_row)
+
+        reset_row = QHBoxLayout()
+        reset_row.addStretch(1)
+        self.reset_button = QPushButton("Reset sound")
+        self.reset_button.setAccessibleName("Reset volume, depth and rumble to defaults")
+        self.reset_button.setToolTip("Back to Volume 70, Depth 65, Rumble 58")
+        self.reset_button.clicked.connect(self._reset_sound_controls)
+        reset_row.addWidget(self.reset_button)
+        s_layout.addLayout(reset_row)
+
+        timer_row = _row("Sleep timer")
+        self.timer_box = Segmented(THEMES[self._resolved_theme()], "Sleep timer")
         for label, minutes in TIMER_CHOICES:
-            self.timer_box.addItem(label, minutes)
+            short = "Off" if minutes == 0 else str(minutes)
+            self.timer_box.addItem(label, minutes, short)
+            self.timer_box.setToolTip("Sleep timer: " + ", ".join(l for l, _ in TIMER_CHOICES))
         self.timer_box.currentIndexChanged.connect(self._timer_changed)
-        timer_row.addWidget(self.timer_box, 1)
+        timer_row.addWidget(self.timer_box, 2)
         s_layout.addLayout(timer_row)
-        look_row = QHBoxLayout()
-        look_row.addWidget(QLabel("Appearance"))
-        self.theme_box = QComboBox()
+
+        look_row = _row("Appearance")
+        self.theme_box = Segmented(THEMES[self._resolved_theme()], "Appearance")
         for label in THEME_CHOICES:
             self.theme_box.addItem(label)
         self.theme_box.currentIndexChanged.connect(self._theme_changed)
-        look_row.addWidget(self.theme_box, 1)
+        look_row.addWidget(self.theme_box, 2)
         s_layout.addLayout(look_row)
-        motion_row = QHBoxLayout()
-        motion_row.addWidget(QLabel("Reduce motion"))
-        self.motion_box = QComboBox()
+
+        motion_row = _row("Reduce motion")
+        self.motion_box = Toggle(THEMES[self._resolved_theme()], "Reduce motion")
         self.motion_box.addItem("Off")
         self.motion_box.addItem("On")
         self.motion_box.currentIndexChanged.connect(self._motion_changed)
-        motion_row.addWidget(self.motion_box, 1)
+        motion_row.addWidget(self.motion_box)
         s_layout.addLayout(motion_row)
         self.settings.setVisible(False)
         layout.addWidget(self.settings)
@@ -477,7 +797,10 @@ class Popup(QWidget):
         QWidget.setTabOrder(self.restart_button, self.play_button)
         QWidget.setTabOrder(self.play_button, self.settings_button)
         QWidget.setTabOrder(self.settings_button, self.volume)
-        QWidget.setTabOrder(self.volume, self.timer_box)
+        QWidget.setTabOrder(self.volume, self.depth)
+        QWidget.setTabOrder(self.depth, self.rumble)
+        QWidget.setTabOrder(self.rumble, self.reset_button)
+        QWidget.setTabOrder(self.reset_button, self.timer_box)
         QWidget.setTabOrder(self.timer_box, self.theme_box)
         QWidget.setTabOrder(self.theme_box, self.motion_box)
 
@@ -492,6 +815,7 @@ class Popup(QWidget):
         self.elapsed_timer.setInterval(1000)
         self.elapsed_timer.timeout.connect(self._elapsed_tick)
 
+        self.eq.source = self.player.source.rms_values  # real live energy
         self.apply_theme(self._system_theme())
         self._set_fixed_height()
 
@@ -526,6 +850,7 @@ class Popup(QWidget):
         chevron = (f"QPushButton {{ color: {t['subtext']}; background: transparent;"
                    f" border: none; border-radius: 16px; }}"
                    f"QPushButton:hover {{ background: {t['hover']}; }}"
+                   f"QPushButton:pressed {{ background: {t['field']}; }}"
                    f"QPushButton:focus {{ border: 2px solid {t['accent_text']}; }}")
         self.prev_button.setStyleSheet(chevron)
         self.next_button.setStyleSheet(chevron)
@@ -536,6 +861,7 @@ class Popup(QWidget):
         circle = (f"QPushButton {{ background: transparent; border: 1.5px solid {t['outline']};"
                   f" border-radius: 20px; }}"
                   f"QPushButton:hover {{ background: {t['hover']}; }}"
+                  f"QPushButton:pressed {{ background: {t['field']}; }}"
                   f"QPushButton:focus {{ border: 2px solid {t['accent_text']}; }}"
                   f"QPushButton:checked {{ border-color: {t['accent']}; }}")
         self.restart_button.setStyleSheet(circle)
@@ -548,14 +874,14 @@ class Popup(QWidget):
             f"QWidget {{ {_font_css()}background: transparent; color: {t['text']}; font-size: 13px; }}"
             f"QLabel {{ background: transparent; }}"
             f"QSlider::groove:horizontal {{ height: 4px; background: {t['outline']}; border-radius: 2px; }}"
-            f"QSlider::handle:horizontal {{ width: 14px; height: 14px; margin: -5px 0;"
-            f" border-radius: 7px; background: {t['accent']}; }}"
-            f"QSlider::sub-page:horizontal {{ background: {t['accent']}; border-radius: 2px; }}"
-            f"QComboBox {{ background: {t['field']}; color: {t['text']}; border: none;"
-            f" border-radius: 6px; padding: 5px 8px; }}"
-            f"QComboBox QAbstractItemView {{ background: {t['field']}; color: {t['text']};"
-            f" border: 1px solid {t['outline']}; }}"
-            f"QComboBox:focus {{ border: 2px solid {t['accent_text']}; border-radius: 6px; }}")
+            f"QSlider::handle:horizontal {{ width: 16px; height: 16px; margin: -6px 0;"
+            f" border-radius: 8px; background: {t['accent']}; }}"
+            f"QSlider::handle:horizontal:hover {{ background: {t['pressed']}; }}"
+            f"QSlider::handle:horizontal:pressed {{ background: {t['pressed']}; }}"
+            f"QSlider::sub-page:horizontal {{ background: {t['accent']}; border-radius: 2px; }}")
+        self.timer_box.set_theme(t)
+        self.theme_box.set_theme(t)
+        self.motion_box.set_theme(t)
         self.eq.update()
         self.play_button.update()
         self.update()
@@ -632,8 +958,13 @@ class Popup(QWidget):
     def _restart(self):
         if not self.player.current:
             return
-        self.player.media.setPosition(0)
-        self.player.resume()
+        self.player.restart()
+        minutes = self.timer_box.itemData(self.timer_box.currentIndex())
+        if minutes:
+            # The preview's restart also restarts the sleep timer.
+            self.sleep_timer.start(minutes * 60 * 1000)
+            self.tick.start()
+            self._update_countdown()
         self._entered_playing()
 
     def _elapsed_tick(self):
@@ -650,8 +981,13 @@ class Popup(QWidget):
         if self.sleep_timer.isActive():
             self._update_countdown()
         else:
-            self.eq.status_text = "Live" if self.is_playing else ""
+            self.eq.status_text = "Live" if self.is_playing else "Paused"
             self.eq.update()
+
+    def _reset_sound_controls(self):
+        self.volume.setValue(synth.DEFAULT_VOLUME)
+        self.depth.setValue(synth.DEFAULT_DEPTH)
+        self.rumble.setValue(synth.DEFAULT_RUMBLE)
 
     # ----- sleep timer -----
 
@@ -691,10 +1027,28 @@ class Popup(QWidget):
         self.reduce_motion = self.motion_box.currentText() == "On"
         self.eq.set_reduce_motion(self.reduce_motion)
         self.play_button.reduce_motion = self.reduce_motion
+        self.timer_box.reduce_motion = self.reduce_motion
+        self.theme_box.reduce_motion = self.reduce_motion
+        self.motion_box.reduce_motion = self.reduce_motion
+        self.timer_box.reduce_motion = self.reduce_motion
+        self.theme_box.reduce_motion = self.reduce_motion
+        self.motion_box.reduce_motion = self.reduce_motion
 
     def _set_fixed_height(self):
         h = self.BASE_HEIGHT + (self.SETTINGS_HEIGHT if self._settings_open else 0)
         self.setFixedSize(300, h)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, "reduce_motion", False):
+            self.setWindowOpacity(0.0)
+            anim = QPropertyAnimation(self, b"windowOpacity", self)
+            anim.setDuration(120)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+            self._show_anim = anim
 
     def show_near_cursor(self):
         self.move(QCursor.pos().x() - self.width() // 2, QCursor.pos().y() + 12)
