@@ -17,8 +17,8 @@ formal written offer are in `WRITTEN_OFFER.txt`.
   library only). No audio recordings or samples are bundled.
 - Icon/tray PNGs were generated for this project; no third-party artwork.
 
-## Qt 6.12.0 - GNU LGPL v3
-- Used via the PySide6 6.12.0 Python wheels. Qt is unmodified and
+## Qt 6.11.3 - GNU LGPL v3
+- Used via the PySide6 6.11.3 Python wheels. Qt is unmodified and
   dynamically linked: `dither/_internal/libQt6*.so.6`.
 - Qt is Copyright The Qt Company Ltd. and other contributors.
 - License texts: licenses/LGPL-3.0.txt plus licenses/GPL-3.0.txt
@@ -26,11 +26,11 @@ formal written offer are in `WRITTEN_OFFER.txt`.
 - Corresponding source: see WRITTEN_OFFER.txt (upstream Qt source URL
   verified live 12 Nov 2026).
 
-## FFmpeg 9.0.1 - GNU LGPL v2.1 or later
+## FFmpeg 7.1.5 - GNU LGPL v2.1 or later
 - Used by Qt Multimedia's playback backend. Unmodified shared libraries:
-  `dither/_internal/libavcodec.so.63` (63.1.101), `libavformat.so.63`,
-  `libavutil.so.61`, `libswresample.so.7`, `libswscale.so.10`.
-  Version confirmed from the "FFmpeg version 9.0.1" string embedded in
+  `dither/_internal/libavcodec.so.61` (63.1.101), `libavformat.so.61`,
+  `libavutil.so.59`, `libswresample.so.5`, `libswscale.so.8`.
+  Version confirmed from the "FFmpeg version 7.1.5" string embedded in
   the bundled libavcodec.
 - License text: licenses/LGPL-2.1.txt.
 - Corresponding source: see WRITTEN_OFFER.txt (ffmpeg.org release URL
@@ -48,6 +48,6 @@ Because this is a one-directory build, you can replace Qt or FFmpeg
 directly: drop your own builds of the `libQt6*.so.6` or `libav*.so` /
 `libsw*.so` files into `dither/_internal/` (keeping the sonames) and
 run `dither/dither`. Alternatively, install your own Qt/FFmpeg
-(`pip install PySide6==6.12.0` or a custom build) and run the app from
+(`pip install PySide6==6.11.3` or a custom build) and run the app from
 `source/` with `python3 run_dither.py`; the source run links whatever
 Qt/FFmpeg you installed.

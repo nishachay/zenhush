@@ -35,7 +35,7 @@ Run
   bundled libraries from dither/_internal/.
 
 Third-party components and licenses
-  This build bundles Qt 6.12.0 (LGPL v3) and FFmpeg 9.0.1 (LGPL v2.1+)
+  This build bundles Qt 6.11.3 (LGPL v3) and FFmpeg 7.1.5 (LGPL v2.1+)
   as ordinary shared-library files under dither/_internal/ (replaceable),
   plus a Python 3.10 runtime (PSF) and the PyInstaller bootloader.
   See THIRD_PARTY_NOTICES.md, WRITTEN_OFFER.txt (corresponding source,

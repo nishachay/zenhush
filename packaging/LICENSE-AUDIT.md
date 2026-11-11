@@ -22,7 +22,7 @@ no distribution has happened.
   is used and where to get it, and keep Qt dynamically linked (it is, in
   the PyInstaller layout) or otherwise allow relinking. Qt itself is
   unmodified, so no Qt source offer beyond pointing at upstream.
-- **FFmpeg 9.0.1 (LGPL v2.1+)**, used by Qt Multimedia's playback backend.
+- **FFmpeg 7.1.5 (LGPL v2.1+)**, used by Qt Multimedia's playback backend.
   Same LGPL notice obligations; FFmpeg is unmodified and dynamically
   loaded by Qt.
 - **Python 3.10 runtime (PSF license)**, permissive; include the PSF notice.
@@ -51,3 +51,9 @@ no distribution has happened.
 2. Trademark clearance for the name "dither" (not done - see brand File).
 3. Windows/macOS binaries are not built; no claims until CI or real
    machines run the test suites there.
+
+## Version pin note (12 Nov 2026)
+PySide6 is pinned to 6.11.3 (Qt 6.11.3, FFmpeg 7.1.5). The 6.12.0 wheels
+crash on Python < 3.12 (singleton refcount corruption, none_dealloc aborts;
+Qt PYSIDE-3424/PYSIDE-3474). Observed live: repeated aborts during custom
+painting under 6.12.0; the same workload runs clean on 6.11.3.
