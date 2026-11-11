@@ -40,6 +40,18 @@ license texts are in `licenses/`.
   at no charge from https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz
   (file verified live 12 Nov 2026).
 
+## PySide6 / Shiboken 6.11.3 - GNU LGPL v3
+- The Python bindings for Qt, unmodified from the official PySide6 6.11.3
+  wheels: `libpyside6.abi3.so.6.11`, `libshiboken6.abi3.so.6.11` and the
+  Qt*.abi3.so extension modules under `dither/_internal/`.
+- License texts: licenses/LGPL-3.0.txt plus licenses/GPL-3.0.txt.
+- Corresponding source: the complete PySide6/Shiboken 6.11.3 source
+  (pyside-setup, including build scripts) is available at no charge from
+  https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.11.3-src/
+  (directory verified live 12 Nov 2026). Replaceable the same way as Qt:
+  drop rebuilt files into `dither/_internal/`, or
+  `pip install PySide6==6.11.3` and run from `source/`.
+
 ## Python 3.10.12 runtime - PSF License
 - License text: licenses/PSF-Python-3.10-LICENSE.txt.
 
