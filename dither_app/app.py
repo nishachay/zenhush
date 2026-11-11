@@ -30,24 +30,25 @@ CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "dither")
 TIMER_CHOICES = [("Off", 0), ("15 min", 15), ("30 min", 30), ("45 min", 45), ("60 min", 60)]
 THEME_CHOICES = ["Auto", "Light", "Dark"]
 
-# Semantic color tokens per theme (one accent ramp = the dither amber).
+# Semantic color tokens per theme. Accent is the reference blue; the
+# brand amber remains an internal alternate (see git history).
 # Text-accent is darkened in light mode so status text reaches 4.5:1.
 THEMES = {
     "light": {
         "window": "#F2F2F5", "card": "#FFFFFF", "inset": "#F0F0F3",
         "text": "#151517", "subtext": "#6E6E74",
         "bar": "#D9D9DE", "bar_strong": "#3C3C41",
-        "accent": "#C8823E", "accent_text": "#8F5B1E", "on_accent": "#FFFFFF",
-        "outline": "#D8D8DD", "edge": "#00000014", "hover": "#E8E8EC",
-        "field": "#F0F0F3", "pressed": "#A96E33",
+        "accent": "#2E7CF6", "accent_text": "#1B5FD0", "on_accent": "#FFFFFF",
+        "outline": "#D8D8DD", "edge": (0, 0, 0, 20), "hover": "#E8E8EC",
+        "field": "#F0F0F3", "pressed": "#1F63D8",
     },
     "dark": {
         "window": "#1B1B1E", "card": "#0C0C0F", "inset": "#232327",
         "text": "#F4F4F6", "subtext": "#9B9BA2",
         "bar": "#3A3A40", "bar_strong": "#D6D6DB",
-        "accent": "#C8823E", "accent_text": "#DDA266", "on_accent": "#FFFFFF",
-        "outline": "#3A3A40", "edge": "#FFFFFF14", "hover": "#26262B",
-        "field": "#232327", "pressed": "#A96E33",
+        "accent": "#2E7CF6", "accent_text": "#7FB0FF", "on_accent": "#FFFFFF",
+        "outline": "#3A3A40", "edge": (255, 255, 255, 20), "hover": "#26262B",
+        "field": "#232327", "pressed": "#1F63D8",
     },
 }
 
@@ -109,12 +110,20 @@ def _pixmap(kind, color, size=64):
         p.setBrush(QColor(color))
         p.drawPath(path)
     elif kind == "gear":
-        r1, r2 = size * 0.20, size * 0.31
+        # ring + outward teeth: reads as a gear, not a sun
+        ring_pen = QPen(QColor(color), size / 12.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        p.setPen(ring_pen)
+        p.drawEllipse(QPointF(c, c), size * 0.155, size * 0.155)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(color))
+        tw, th = size * 0.085, size * 0.14
         for i in range(8):
             a = math.radians(i * 45)
-            p.drawLine(QPointF(c + r1 * math.cos(a), c + r1 * math.sin(a)),
-                       QPointF(c + r2 * math.cos(a), c + r2 * math.sin(a)))
-        p.drawEllipse(QPointF(c, c), size * 0.10, size * 0.10)
+            p.save()
+            p.translate(c + size * 0.26 * math.cos(a), c + size * 0.26 * math.sin(a))
+            p.rotate(math.degrees(a) + 90)
+            p.drawRoundedRect(int(-tw / 2), int(-th / 2), int(tw), int(th), 2, 2)
+            p.restore()
     elif kind == "chevron-left":
         path = QPainterPath()
         path.moveTo(c + 6, c - 11)
@@ -554,7 +563,7 @@ class Popup(QWidget):
         # Outer radius (24) = inset radius (12) + padding (12).
         path.addRoundedRect(0, 0, self.width() - 1, self.height() - 1, 24, 24)
         p.fillPath(path, QColor(t["card"]))
-        p.setPen(QPen(QColor(t["edge"]), 1))  # structural edge, black/white at 8%
+        p.setPen(QPen(QColor(*t["edge"]), 1))  # structural edge, black/white at 8%
         p.drawPath(path)
         p.end()
 
