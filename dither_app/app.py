@@ -12,7 +12,7 @@ import math
 import os
 import sys
 
-from PySide6.QtCore import (QEasingCurve, QPoint, QPointF, QRectF, Qt, QTimer,
+from PySide6.QtCore import (QEasingCurve, QPoint, QPointF, QRectF, QSize, Qt, QTimer,
                             QUrl, QPropertyAnimation, Property)
 from PySide6.QtGui import (QAction, QBrush, QColor, QCursor, QFont,
                            QFontDatabase, QGuiApplication, QIcon, QPainter,
@@ -520,7 +520,7 @@ class Popup(QWidget):
         self.eq._cache_colors()
         self.play_button.set_theme(t)
         self.title.setStyleSheet(
-            f"{_font_css()}color: {t['text']}; font-size: 16px; font-weight: 600; background: transparent;")
+            f"{_font_css()}color: {t['text']}; font-size: 16px; font-weight: 700; background: transparent;")
         self.subtitle.setStyleSheet(
             f"{_font_css()}color: {t['subtext']}; font-size: 13px; background: transparent;")
         chevron = (f"QPushButton {{ color: {t['subtext']}; background: transparent;"
@@ -531,6 +531,8 @@ class Popup(QWidget):
         self.next_button.setStyleSheet(chevron)
         self.prev_button.setIcon(QIcon(_pixmap("chevron-left", t["subtext"], 32, 18 / 32)))
         self.next_button.setIcon(QIcon(_pixmap("chevron-right", t["subtext"], 32, 18 / 32)))
+        self.prev_button.setIconSize(QSize(32, 32))
+        self.next_button.setIconSize(QSize(32, 32))
         circle = (f"QPushButton {{ background: transparent; border: 1.5px solid {t['outline']};"
                   f" border-radius: 20px; }}"
                   f"QPushButton:hover {{ background: {t['hover']}; }}"
@@ -540,6 +542,8 @@ class Popup(QWidget):
         self.settings_button.setStyleSheet(circle)
         self.restart_button.setIcon(QIcon(_pixmap("restart", t["text"], 40, 20 / 40)))
         self.settings_button.setIcon(QIcon(_pixmap("gear", t["text"], 40, 20 / 40)))
+        self.restart_button.setIconSize(QSize(40, 40))
+        self.settings_button.setIconSize(QSize(40, 40))
         self.settings.setStyleSheet(
             f"QWidget {{ {_font_css()}background: transparent; color: {t['text']}; font-size: 13px; }}"
             f"QLabel {{ background: transparent; }}"
