@@ -588,7 +588,6 @@ class Player:
         fmt.setSampleFormat(QAudioFormat.Int16)
         self.source = synth.LiveSource()
         self.sink = QAudioSink(fmt)
-        self.sink.setVolume(synth.volume_gain(synth.DEFAULT_VOLUME))
         self._started = False
         self.current = None
 
@@ -614,8 +613,11 @@ class Player:
         self.sink.resume()
 
     def set_volume(self, value):
-        """Slider 0-100, preview-fitted curve: 70 -> gain 0.44."""
-        self.sink.setVolume(synth.volume_gain(value))
+        """Slider 0-100, preview-fitted curve: 70 -> gain 0.44.
+
+        Applied inside the float chain, before the output stage, so the
+        order matches the preview (filters -> volume -> DAC)."""
+        self.source.set_volume(value)
 
     def set_depth(self, value):
         """Slider 0-100: lowpass cutoff, higher is darker."""

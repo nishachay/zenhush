@@ -26,12 +26,23 @@ from PySide6.QtCore import QIODevice
 SAMPLE_RATE = 44100
 
 # Per-recipe loudness: measured output RMS at default Depth/Rumble varies
-# widely (brown 0.79, white 0.08), so each recipe gets a gain that lands it
-# at TARGET_RMS, like the original offline renderer's normalization.
+# widely, so each recipe gets a gain that lands it near TARGET_RMS, like the
+# original offline renderer's normalization. The values are then trimmed by
+# HEADROOM so the loudest corner (max rumble, default volume) stays below
+# clipping; the volume slider's upper half easily makes the level back.
 TARGET_RMS = 0.12
-OUTPUT_GAIN = {"brown": 0.09, "white": 1.43, "pink": 0.41, "rain": 0.66, "ocean": 0.12}
+HEADROOM = 0.5
+OUTPUT_GAIN = {"brown": 0.09 * HEADROOM, "white": 1.43 * HEADROOM,
+               "pink": 0.41 * HEADROOM, "rain": 0.66 * HEADROOM,
+               "ocean": 0.12 * HEADROOM}
 # Visualizer: normalized output breathes around 0.7 on the bars.
-RMS_SCALE = 4.6
+RMS_SCALE = 8.0
+
+# Gain staging, faithful to the preview's Web Audio chain: everything runs in
+# float, the rumble lowshelf boosts absolutely (more rumble = more low end,
+# never less volume), depth is a plain lowpass, and volume is the last gain
+# before the output. Like a DAC, the only clip point is the final conversion;
+# at the default Volume 70 (gain 0.44) even maxed Depth+Rumble stay clean.
 CHANNELS = 1  # mono: lightest CPU, indistinguishable for shaped noise
 _CHUNK = 661  # ~15 ms at 44.1 kHz, matches the visualizer window
 
@@ -58,6 +69,12 @@ def depth_cutoff_hz(value):
 def rumble_gain_db(value):
     """Slider 0-100 -> lowshelf boost in dB. 58 gives +4.0 dB."""
     return RUMBLE_MAX_DB * (value / 100.0) ** 2
+
+
+# The one-pole shelf picks up ~60% of the sub-band, so the raw gain needs a
+# drive factor to deliver the rated dB at the output (measured: 58 -> +4.0,
+# 100 -> +12.2 dB on flat white noise).
+RUMBLE_DRIVE = 1.7
 
 
 class _Voice:
@@ -132,6 +149,9 @@ class LiveSource(QIODevice):
         self._rumble_a = 0.0
         self._rumble_gain = 1.0
         self._rumble_state = 0.0
+        # volume: last gain stage, ramped to avoid zipper noise
+        self._volume = volume_gain(DEFAULT_VOLUME)
+        self._volume_target = self._volume
         self.set_depth(DEFAULT_DEPTH)
         self.set_rumble(DEFAULT_RUMBLE)
         # gentle fade-in so play/resume/switch never clicks or pops
@@ -173,13 +193,17 @@ class LiveSource(QIODevice):
             self._rms_ring.clear()
             self._fade_left = self.FADE_SAMPLES
 
+    def set_volume(self, value):
+        """Slider 0-100, preview-fitted curve: 70 -> gain 0.44."""
+        self._volume_target = volume_gain(value)
+
     def set_depth(self, value):
         cutoff = depth_cutoff_hz(value)
         # one-pole lowpass: a = 1 - exp(-2*pi*fc/fs)
         self._depth_a = 1.0 - math.exp(-2.0 * math.pi * cutoff / SAMPLE_RATE)
 
     def set_rumble(self, value):
-        self._rumble_gain = 10.0 ** (rumble_gain_db(value) / 20.0) - 1.0
+        self._rumble_gain = (10.0 ** (rumble_gain_db(value) / 20.0) - 1.0) * RUMBLE_DRIVE
         self._rumble_a = 1.0 - math.exp(-2.0 * math.pi * RUMBLE_SHELF_HZ / SAMPLE_RATE)
 
     def soft_start(self):
@@ -209,6 +233,9 @@ class LiveSource(QIODevice):
         rumble_g = self._rumble_gain
         rumble_s = self._rumble_state
         nxt = voice.next
+        vol = self._volume
+        vol_t = self._volume_target
+        vol_step = (vol_t - vol) / max(1, min(n, 882))  # ~20 ms ramp
         fade = self._fade_left
         fade_total = self.FADE_SAMPLES
         buf = array("h", bytes(2 * n))
@@ -220,7 +247,11 @@ class LiveSource(QIODevice):
             x = nxt(kind, uniform)
             depth_s += depth_a * (x - depth_s)
             rumble_s += rumble_a * (x - rumble_s)
-            v = (depth_s + rumble_s * rumble_g) * (gain / (1.0 + rumble_g))
+            v = (depth_s + rumble_s * rumble_g) * gain * vol
+            if vol != vol_t:
+                vol += vol_step
+                if (vol_t - vol) * vol_step < 0:
+                    vol = vol_t
             if fade > 0:
                 v *= (fade_total - fade) / fade_total
                 fade -= 1
@@ -237,6 +268,7 @@ class LiveSource(QIODevice):
                 cnt = 0
         self._depth_state = depth_s
         self._rumble_state = rumble_s
+        self._volume = vol
         self._fade_left = fade
         self._rms_acc = acc
         self._rms_n = cnt

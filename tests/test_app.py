@@ -86,14 +86,10 @@ def main():
     check("restart no-op before first play", not fresh.is_playing and fresh.eq.elapsed_text == "0:00")
 
     # Volume
-    recorded = []
-    real_set_volume = player.sink.setVolume
-    player.sink.setVolume = recorded.append  # offscreen sink swallows volume
     popup.volume.setValue(35)
-    player.sink.setVolume = real_set_volume
     expected = synth.volume_gain(35)
-    check("volume applied to output", recorded and abs(recorded[-1] - expected) < 1e-6,
-          f"{recorded[-1] if recorded else 'never called'} vs {expected}")
+    check("volume applied to the float chain", abs(player.source._volume_target - expected) < 1e-6,
+          f"{player.source._volume_target} vs {expected}")
     check("preview default volume 70 maps to gain 0.44",
           abs(synth.volume_gain(70) - 0.441) < 0.005, f"{synth.volume_gain(70)}")
 

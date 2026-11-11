@@ -48,14 +48,24 @@ check("signal stays healthy over 30 s", 0.03 < rms < 0.5 and 0.03 < rms_end < 0.
       f"first {rms:.3f}, last {rms_end:.3f}")
 check("generation is light on the CPU", dt < 1.5, f"30 s in {dt*1000:.0f} ms ({dt/30*100:.1f}% of one core)")
 
-# 2. Never repeats: distant windows are uncorrelated, fresh sources differ
+# 2. Never repeats: not a loop, distant windows differ, fresh sources differ
 a = xs[:44100]
 b = xs[20 * 44100: 21 * 44100]
 dot = sum(x * y for x, y in zip(a, b)) / 44100
 na = math.sqrt(sum(x * x for x in a) / 44100)
 nb = math.sqrt(sum(x * x for x in b) / 44100)
 corr = dot / (na * nb) if na and nb else 1.0
-check("second 0 and second 20 are uncorrelated", abs(corr) < 0.2, f"corr {corr:.3f}")
+# A 20 s loop replays exactly (corr 1.0); brown noise's natural long memory
+# wanders anywhere in between, so the bar is "not a replay".
+check("second 20 is not a replay of second 0", abs(corr) < 0.9, f"corr {corr:.3f}")
+wsrc = synth.LiveSource("white")
+w = samples(grab(wsrc, 22))
+wa, wb = w[:44100], w[21 * 44100: 22 * 44100]
+dot = sum(x * y for x, y in zip(wa, wb)) / 44100
+na = math.sqrt(sum(x * x for x in wa) / 44100)
+nb = math.sqrt(sum(x * x for x in wb) / 44100)
+wcorr = dot / (na * nb) if na and nb else 1.0
+check("white noise windows are truly independent", abs(wcorr) < 0.1, f"corr {wcorr:.3f}")
 other = synth.LiveSource("brown")
 check("two sources generate different noise", grab(src, 1) != grab(other, 1))
 src2 = synth.LiveSource("brown")
@@ -81,20 +91,42 @@ def hf_energy(depth):
 check("depth darkens the sound", hf_energy(100) < hf_energy(0) * 0.3,
       f"{hf_energy(100):.0f} vs {hf_energy(0):.0f}")
 
-# 5. Rumble is a real lowshelf: it tilts energy toward the lows
-def high_residual(rumble):
+# 5. Rumble is a real lowshelf: it boosts the low band absolutely, matching
+# the preview's rated dB at the known points (58 -> +4, 100 -> +12)
+def low_band_db(rumble):
     s = synth.LiveSource("white")
-    s.set_depth(0)
+    s.set_depth(0)  # flat source so the shelf is isolated
     s.set_rumble(rumble)
+    s.set_volume(100)
     d = samples(grab(s, 2))
     lp = 0.0
-    hi = 0.0
+    lo = 0.0
+    a = 1 - math.exp(-2 * math.pi * 160 / synth.SAMPLE_RATE)
     for x in d:
-        lp += 0.02 * (x - lp)
-        hi += (x - lp) ** 2
-    return math.sqrt(hi / len(d))
-check("rumble boosts lows over highs", high_residual(100) < high_residual(0) * 0.45,
-      f"{high_residual(100):.0f} vs {high_residual(0):.0f}")
+        lp += a * (x - lp)
+        lo += lp * lp
+    return math.sqrt(lo / len(d))
+base = low_band_db(0)
+db58 = 20 * math.log10(low_band_db(58) / base)
+db100 = 20 * math.log10(low_band_db(100) / base)
+check("rumble 58 boosts lows by ~+4 dB", 3.0 < db58 < 5.5, f"{db58:+.1f} dB")
+check("rumble 100 boosts lows by ~+12 dB", 10.5 < db100 < 15.0, f"{db100:+.1f} dB")
+
+# 5b. Gain staging: no clipping at or below default volume, any sound,
+# any filter setting, across seeds (vol 100 + rumble 100 may clip, as a DAC would)
+def worst_peak(sound, vol, seeds=3):
+    worst = 0.0
+    for _ in range(seeds):
+        for depth in (0, 65, 100):
+            for rumble in (0, 58, 100):
+                s = synth.LiveSource(sound)
+                s.set_depth(depth); s.set_rumble(rumble); s.set_volume(vol)
+                d = samples(grab(s, 1))
+                worst = max(worst, max(abs(x) for x in d) / 32767)
+    return worst
+for name in ("brown", "white", "pink", "rain", "ocean"):
+    w = worst_peak(name, 70)
+    check(f"{name}: clean at default volume across all settings", w < 0.99, f"peak {w:.2f}")
 
 # 6. Every sound generates distinct, healthy noise
 for name in ("white", "pink", "rain", "ocean"):
