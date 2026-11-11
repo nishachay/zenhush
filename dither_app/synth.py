@@ -47,8 +47,12 @@ RMS_SCALE = 12.0
 # before the output. The final stage is a transparent peak safety: below
 # 0.89 (-1 dBFS) samples pass through untouched (it never engages at or
 # below the default volume, measured across all sounds/settings); above it
-# a soft knee rounds peaks toward full scale, so no slider combination can
-# produce harsh digital clipping.
+# a soft knee rounds peaks toward full scale. The knee's output is bounded
+# strictly below 1.0 for every possible input by construction (its tanh
+# branch asymptotes at 1.0), so int16 conversion can never overflow or
+# produce harsh digital clipping, regardless of slider positions. How
+# close peaks get to full scale is signal-dependent and covered by the
+# sampled corner tests, not by that guarantee.
 CHANNELS = 1  # mono: lightest CPU, indistinguishable for shaped noise
 _CHUNK = 661  # ~15 ms at 44.1 kHz, matches the visualizer window
 

@@ -1,12 +1,10 @@
 # Third-party notices for the dither Linux binary
 
-This file ships with the dither test package. The application directory
+This file ships with the dither package. The application directory
 `dither/` is a PyInstaller one-directory build: the executable
 `dither/dither` loads shared libraries from `dither/_internal/`, where
 every library sits as a separate, directly replaceable file. Full
-license texts are in `licenses/`. Corresponding-source arrangements for
-the LGPL libraries are tracked as open release work in LICENSE-AUDIT.md;
-no written offer is issued with this private test package.
+license texts are in `licenses/`.
 
 ## dither's own code and content
 - All application code (`dither_app/`, `run_dither.py`), tests and
@@ -14,28 +12,33 @@ no written offer is issued with this private test package.
   this package under `source/`. No public license has been chosen yet;
   until one is, the code is all-rights-reserved and shared privately
   with this package's recipient only.
-- All sound is synthesized at runtime by `noise_gen.py` (Python standard
-  library only). No audio recordings or samples are bundled.
+- All sound is synthesized at runtime; no audio recordings or samples
+  are bundled.
 - Icon/tray PNGs were generated for this project; no third-party artwork.
 
 ## Qt 6.11.3 - GNU LGPL v3
-- Used via the PySide6 6.11.3 Python wheels. Qt is unmodified and
-  dynamically linked: `dither/_internal/libQt6*.so.6`.
+- Used via the official PySide6 6.11.3 Python wheels, unmodified and
+  dynamically linked: `libQt6*.so.6` under `dither/_internal/` and
+  `dither/_internal/PySide6/Qt/lib/`.
 - Qt is Copyright The Qt Company Ltd. and other contributors.
 - License texts: licenses/LGPL-3.0.txt plus licenses/GPL-3.0.txt
   (LGPL v3 applies GPL v3 with additional permissions).
-- Corresponding source: open release work, see LICENSE-AUDIT.md
-  (upstream Qt source URL verified live 12 Nov 2026).
+- Corresponding source: Qt builds the PySide6 wheels from the official
+  Qt release sources. The complete corresponding source for Qt 6.11.3
+  is available at no charge from
+  https://download.qt.io/official_releases/qt/6.11/6.11.3/single/
+  (directory verified live 12 Nov 2026).
 
 ## FFmpeg 7.1.5 - GNU LGPL v2.1 or later
-- Used by Qt Multimedia's playback backend. Unmodified shared libraries:
-  `dither/_internal/libavcodec.so.61` (63.1.101), `libavformat.so.61`,
-  `libavutil.so.59`, `libswresample.so.5`, `libswscale.so.8`.
-  Version confirmed from the "FFmpeg version 7.1.5" string embedded in
-  the bundled libavcodec.
+- Used by Qt Multimedia's playback backend. Unmodified shared libraries
+  from the PySide6 wheels: `libavcodec.so.61`, `libavformat.so.61`,
+  `libavutil.so.59`, `libswresample.so.5`, `libswscale.so.8` under
+  `dither/_internal/`. Version confirmed from the
+  "FFmpeg version 7.1.5" string embedded in the bundled libavcodec.
 - License text: licenses/LGPL-2.1.txt.
-- Corresponding source: open release work, see LICENSE-AUDIT.md
-  (ffmpeg.org release URL verified live 12 Nov 2026).
+- Corresponding source: the complete FFmpeg 7.1.5 source is available
+  at no charge from https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz
+  (file verified live 12 Nov 2026).
 
 ## Python 3.10.12 runtime - PSF License
 - License text: licenses/PSF-Python-3.10-LICENSE.txt.
@@ -47,8 +50,9 @@ no written offer is issued with this private test package.
 ## Replacing the LGPL libraries
 Because this is a one-directory build, you can replace Qt or FFmpeg
 directly: drop your own builds of the `libQt6*.so.6` or `libav*.so` /
-`libsw*.so` files into `dither/_internal/` (keeping the sonames) and
-run `dither/dither`. Alternatively, install your own Qt/FFmpeg
+`libsw*.so` files into `dither/_internal/` (and
+`dither/_internal/PySide6/Qt/lib/`, keeping the sonames) and run
+`dither/dither`. Alternatively, install your own Qt/FFmpeg
 (`pip install PySide6==6.11.3` or a custom build) and run the app from
 `source/` with `python3 run_dither.py`; the source run links whatever
 Qt/FFmpeg you installed.

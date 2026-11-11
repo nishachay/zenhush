@@ -112,9 +112,15 @@ db100 = 20 * math.log10(low_band_db(100) / base)
 check("rumble 58 boosts lows by ~+4 dB", 3.0 < db58 < 5.5, f"{db58:+.1f} dB")
 check("rumble 100 boosts lows by ~+12 dB", 10.5 < db100 < 15.0, f"{db100:+.1f} dB")
 
-# 5b. Gain staging: transparent below the knee at defaults, and NO harsh
-# clipping at ANY valid slider combination - the peak safety rounds peaks
-# softly, so samples never flatline at full scale even at max everything.
+# 5b. Gain staging. Two distinct guarantees:
+#   - Structural (all inputs, no sampling): the soft knee bounds every
+#     output sample strictly below full scale by construction, so int16
+#     conversion can never overflow.
+#   - Sampled (this matrix): at the tested corners (volume endpoints +
+#     default x depth/rumble endpoints + default, a few seeds per corner)
+#     peaks stay below full scale, the knee never engages at or below the
+#     default volume, and no sustained full-scale runs occur. This is not
+#     an exhaustive sweep of every valid slider combination.
 def matrix_run(sound, vol, seeds=3):
     """(max |sample|, knee engagements, would-have-clipped, longest full-scale run)"""
     peak = knee = limited = longest = 0

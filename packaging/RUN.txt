@@ -38,14 +38,14 @@ Third-party components and licenses
   This build bundles Qt 6.11.3 (LGPL v3) and FFmpeg 7.1.5 (LGPL v2.1+)
   as ordinary shared-library files under dither/_internal/ (replaceable),
   plus a Python 3.10 runtime (PSF) and the PyInstaller bootloader.
-  See THIRD_PARTY_NOTICES.md and licenses/ for the full texts.
-  Corresponding-source arrangements for the LGPL libraries are open
-  release work (LICENSE-AUDIT.md); no written offer ships with this
-  private test package.
+  See THIRD_PARTY_NOTICES.md and licenses/ for the full texts and the
+  corresponding-source locations for the LGPL libraries (both verified
+  live 12 Nov 2026). No written offer ships with this private test
+  package; the notices point to the public sources instead.
   dither's own source is included under source/.
 
 Status
-  Private test build. Test totals: 25 audio-engine checks + 26 UI checks
-  pass against the same code as this binary; the frozen binary's PCM
-  output was verified to match a source run. Not yet: Windows/macOS,
+  Private test build. Test totals: 128 checks (31 synthesis, 68 app, 29
+  noise) pass against the same code as this binary; the frozen binary's
+  PCM output was verified against a source run. Not yet: Windows/macOS,
   icon pixels inside a real desktop panel.
