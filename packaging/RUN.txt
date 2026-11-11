@@ -1,0 +1,32 @@
+dither - Linux build (private test build, not for public distribution)
+
+What this is
+  dither: a tiny noise machine for your top bar. Tray icon + popup with
+  5 synthesized sounds (brown, white, pink, rain, ocean), volume, sleep
+  timer, restart. One-file binary, nothing to install.
+
+Target
+  Architecture: x86_64
+  Minimum OS: glibc 2.35+ (Ubuntu 22.04 / Debian 12 or newer), a desktop
+  session (X11 or Wayland) with a system tray host (GNOME AppIndicator
+  extension, KDE tray, etc.). Without a tray host it falls back to a small
+  window.
+
+Runtime dependencies (usually present; the first is not on minimal X11):
+  sudo apt install libxcb-cursor0        # required on X11, app aborts without it
+  PulseAudio or PipeWire (for audio out)
+
+Run
+  chmod +x dither
+  ./dither
+  Click the tray icon (or use the fallback window) -> pick a sound.
+
+Verified on this build
+  Audio suite 25/25, UI suite 26/26. Live: playback PCM captured from the
+  sound server, gapless loop across the seam, tray show/hide/quit via a
+  real StatusNotifier watcher. <1% of one CPU core, ~90MB RAM.
+  Not yet: Windows/macOS (not built), icon rendering inside a real panel.
+
+License: private build for testing. Bundles Qt (LGPLv3) and FFmpeg
+(LGPLv2.1+); notices and a project license are owed before any public
+release. See packaging/LICENSE-AUDIT.md.

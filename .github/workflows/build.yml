@@ -5,8 +5,7 @@
 name: build
 
 on:
-  pull_request:
-  workflow_dispatch:
+  workflow_dispatch:  # manual only: CI on a private repo can cost money; never auto-run
 
 jobs:
   test-and-build:
