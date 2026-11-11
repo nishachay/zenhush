@@ -147,6 +147,22 @@ def main():
     check("reduce motion stops eq timer", not popup.eq.timer.isActive())
     popup.eq.set_reduce_motion(False)
 
+    # Depth/Rumble sliders drive the engine live; Reset restores preview defaults
+    recorded = {}
+    player.source.set_depth = lambda v: recorded.__setitem__("depth", v)
+    player.source.set_rumble = lambda v: recorded.__setitem__("rumble", v)
+    popup.depth.setValue(90)
+    popup.rumble.setValue(12)
+    check("depth slider reaches the engine", recorded.get("depth") == 90, str(recorded))
+    check("rumble slider reaches the engine", recorded.get("rumble") == 12, str(recorded))
+    popup.volume.setValue(55)
+    popup._reset_sound_controls()
+    check("reset restores preview defaults 70/65/58",
+          popup.volume.value() == 70 and popup.depth.value() == 65 and popup.rumble.value() == 58,
+          f"{popup.volume.value()}/{popup.depth.value()}/{popup.rumble.value()}")
+    check("reset pushes defaults to the engine",
+          recorded.get("depth") == 65 and recorded.get("rumble") == 58, str(recorded))
+
     # Settings disclosure grows the popup
     h0 = popup.height()
     popup.settings_button.setChecked(True)
