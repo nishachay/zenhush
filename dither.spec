@@ -5,7 +5,7 @@ a = Analysis(
     ['run_dither.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('dither_app/assets', 'dither_app/assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

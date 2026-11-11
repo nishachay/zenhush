@@ -17,7 +17,7 @@ from PySide6.QtMultimedia import QMediaPlayer
 
 from dither_app import noise_gen
 from dither_app.app import (CACHE_DIR, THEMES, TIMER_CHOICES, PlayButton,
-                            Popup, Player, contrast_ratio)
+                            Popup, Player, app_font_family, contrast_ratio)
 
 FAILURES = []
 
@@ -149,9 +149,16 @@ def main():
     # Themes: both exist, switching applies, measured contrast passes
     check("both themes defined", set(THEMES) == {"light", "dark"})
     popup.apply_theme("light")
-    check("light theme applied", "#151517" in popup.title.styleSheet())
+    fam = app_font_family()
+    check("bundled font loads", fam == "Schibsted Grotesk", fam or "no family")
+    from PySide6.QtGui import QFontInfo
+    check("title uses bundled font, not fallback",
+          QFontInfo(popup.title.font()).family() == "Schibsted Grotesk",
+          QFontInfo(popup.title.font()).family())
+
+    check("light theme applied", THEMES["light"]["text"] in popup.title.styleSheet())
     popup.apply_theme("dark")
-    check("dark theme applied", "F4F4F6" in popup.title.styleSheet())
+    check("dark theme applied", THEMES["dark"]["text"].lstrip("#") in popup.title.styleSheet())
     for name, t in THEMES.items():
         r_title = contrast_ratio(t["text"], t["card"])
         check(f"{name}: title on card >= 4.5:1", r_title >= 4.5, f"{r_title:.2f}:1")

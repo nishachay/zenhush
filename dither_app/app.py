@@ -12,12 +12,13 @@ import math
 import os
 import sys
 
-from PySide6.QtCore import (QEasingCurve, QPoint, QPointF, Qt, QTimer, QUrl,
-                            QPropertyAnimation, Property)
+from PySide6.QtCore import (QEasingCurve, QPoint, QPointF, QRectF, Qt, QTimer,
+                            QUrl, QPropertyAnimation, Property)
 from PySide6.QtGui import (QAction, QBrush, QColor, QCursor, QFont,
-                           QGuiApplication, QIcon, QPainter, QPainterPath,
-                           QPen, QPixmap)
+                           QFontDatabase, QGuiApplication, QIcon, QPainter,
+                           QPainterPath, QPen, QPixmap)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel,
                                QMenu, QPushButton, QSlider, QSystemTrayIcon,
                                QVBoxLayout, QWidget)
@@ -28,27 +29,55 @@ ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "dither")
 
 TIMER_CHOICES = [("Off", 0), ("15 min", 15), ("30 min", 30), ("45 min", 45), ("60 min", 60)]
+
+_FONT_FAMILY = None
+
+
+def app_font_family():
+    """Load the bundled Schibsted Grotesk (SIL OFL 1.1) once; return its family.
+
+    Falls back to the Qt default family only if the font file is missing, so a
+    broken install degrades instead of crashing."""
+    global _FONT_FAMILY
+    if _FONT_FAMILY is None:
+        path = os.path.join(ASSETS, "fonts", "SchibstedGrotesk.ttf")
+        fid = QFontDatabase.addApplicationFont(path)
+        fams = QFontDatabase.applicationFontFamilies(fid) if fid != -1 else []
+        _FONT_FAMILY = fams[0] if fams else ""
+    return _FONT_FAMILY
+
+
+def _font_css():
+    """font-family declaration for stylesheets that set font-size/weight.
+
+    A Qt stylesheet with any font property re-resolves the widget font from
+    its parent chain; without an explicit family the bundled font can be
+    replaced by the system fallback (observed: DejaVu Sans after a theme
+    switch). Pin the family wherever the stylesheet touches fonts."""
+    fam = app_font_family()
+    return f'font-family: "{fam}"; ' if fam else ""
 THEME_CHOICES = ["Auto", "Light", "Dark"]
 
-# Semantic color tokens per theme. Accent is the reference blue; the
-# brand amber remains an internal alternate (see git history).
+# Semantic color tokens per theme. Warm black + amber, the palette the user
+# picked from the original build (sampled: #0B0A08, #C8823E, #3A332B, #F5F1EA);
+# the reference blue remains in git history as an internal alternate.
 # Text-accent is darkened in light mode so status text reaches 4.5:1.
 THEMES = {
     "light": {
-        "window": "#F2F2F5", "card": "#FFFFFF", "inset": "#F0F0F3",
-        "text": "#151517", "subtext": "#6E6E74",
-        "bar": "#D9D9DE", "bar_strong": "#3C3C41",
-        "accent": "#2E7CF6", "accent_text": "#1B5FD0", "on_accent": "#FFFFFF",
-        "outline": "#D8D8DD", "edge": (0, 0, 0, 20), "hover": "#E8E8EC",
-        "field": "#F0F0F3", "pressed": "#1F63D8",
+        "window": "#F3EFE8", "card": "#FDFBF7", "inset": "#F0EBE2",
+        "text": "#1C1915", "subtext": "#6F6659",
+        "bar": "#DDD5C7", "bar_strong": "#3B352C",
+        "accent": "#C8823E", "accent_text": "#8F5B1E", "on_accent": "#FFFFFF",
+        "outline": "#DCD4C6", "edge": (0, 0, 0, 18), "hover": "#EFE9DF",
+        "field": "#F0EBE2", "pressed": "#A96E33",
     },
     "dark": {
-        "window": "#1B1B1E", "card": "#0C0C0F", "inset": "#232327",
-        "text": "#F4F4F6", "subtext": "#9B9BA2",
-        "bar": "#3A3A40", "bar_strong": "#D6D6DB",
-        "accent": "#2E7CF6", "accent_text": "#7FB0FF", "on_accent": "#FFFFFF",
-        "outline": "#3A3A40", "edge": (255, 255, 255, 20), "hover": "#26262B",
-        "field": "#232327", "pressed": "#1F63D8",
+        "window": "#100E0C", "card": "#0B0A08", "inset": "#221E19",
+        "text": "#F5F1EA", "subtext": "#A89F92",
+        "bar": "#3A332B", "bar_strong": "#E8E1D4",
+        "accent": "#C8823E", "accent_text": "#DDA266", "on_accent": "#FFFFFF",
+        "outline": "#3A332B", "edge": (255, 255, 255, 16), "hover": "#1D1A15",
+        "field": "#221E19", "pressed": "#A96E33",
     },
 }
 
@@ -73,69 +102,39 @@ def contrast_ratio(fg, bg):
     return (hi + 0.05) / (lo + 0.05)
 
 
-def _pixmap(kind, color, size=64):
-    """Paint a line icon. One drawing, recolored per theme/state."""
+_ICON_FILES = {
+    "play": "play.svg", "pause": "pause.svg", "restart": "rotate-ccw.svg",
+    "gear": "settings.svg", "chevron-left": "chevron-left.svg",
+    "chevron-right": "chevron-right.svg",
+}
+_FILLED_KINDS = {"play", "pause"}  # solid glyphs on the accent button
+
+
+def _icon_svg_bytes(kind, color):
+    """Lucide icon (ISC license), recolored: its strokes use currentColor."""
+    path = os.path.join(ASSETS, "icons", _ICON_FILES[kind])
+    data = open(path, "rb").read()
+    hexcol = QColor(color).name().encode()
+    data = data.replace(b"currentColor", hexcol)
+    if kind in _FILLED_KINDS:
+        # The reference shows a solid play triangle / pause bars: fill the
+        # library's path geometry, keeping its stroke in the same color so
+        # the rounded joins and caps survive.
+        for tag in (b"<polygon", b"<rect", b"<path"):
+            data = data.replace(tag, tag + b' fill="%s"' % hexcol)
+    return data
+
+
+def _pixmap(kind, color, size=64, icon_ratio=0.42):
+    """Render one Lucide icon centered on a transparent square pixmap."""
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
-    pen = QPen(QColor(color), size / 13.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-    p.setPen(pen)
-    p.setBrush(Qt.NoBrush)
-    c = size / 2.0
-    if kind == "play":
-        path = QPainterPath()
-        path.moveTo(c - 7, c - 12)
-        path.lineTo(c - 7, c + 12)
-        path.lineTo(c + 13, c)  # shifted toward its point (optical centering)
-        path.closeSubpath()
-        p.setBrush(QColor(color))
-        p.setPen(Qt.NoPen)
-        p.drawPath(path)
-    elif kind == "pause":
-        p.setBrush(QColor(color))
-        p.setPen(Qt.NoPen)
-        p.drawRoundedRect(int(c - 11), int(c - 11), 8, 22, 2, 2)
-        p.drawRoundedRect(int(c + 3), int(c - 11), 8, 22, 2, 2)
-    elif kind == "restart":
-        r = size * 0.30
-        p.drawArc(int(c - r), int(c - r), int(2 * r), int(2 * r), -50 * 16, -270 * 16)
-        ang = math.radians(-50)
-        tip = QPointF(c + r * math.cos(ang), c + r * math.sin(ang))
-        path = QPainterPath()
-        path.moveTo(tip)
-        path.lineTo(tip + QPointF(-2, -10))
-        path.lineTo(tip + QPointF(9, -2))
-        path.closeSubpath()
-        p.setBrush(QColor(color))
-        p.drawPath(path)
-    elif kind == "gear":
-        # ring + outward teeth: reads as a gear, not a sun
-        ring_pen = QPen(QColor(color), size / 12.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-        p.setPen(ring_pen)
-        p.drawEllipse(QPointF(c, c), size * 0.155, size * 0.155)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(color))
-        tw, th = size * 0.085, size * 0.14
-        for i in range(8):
-            a = math.radians(i * 45)
-            p.save()
-            p.translate(c + size * 0.26 * math.cos(a), c + size * 0.26 * math.sin(a))
-            p.rotate(math.degrees(a) + 90)
-            p.drawRoundedRect(int(-tw / 2), int(-th / 2), int(tw), int(th), 2, 2)
-            p.restore()
-    elif kind == "chevron-left":
-        path = QPainterPath()
-        path.moveTo(c + 6, c - 11)
-        path.lineTo(c - 6, c)
-        path.lineTo(c + 6, c + 11)
-        p.drawPath(path)
-    elif kind == "chevron-right":
-        path = QPainterPath()
-        path.moveTo(c - 6, c - 11)
-        path.lineTo(c + 6, c)
-        path.lineTo(c - 6, c + 11)
-        p.drawPath(path)
+    icon_px = size * icon_ratio
+    x = (size - icon_px) / 2.0
+    QSvgRenderer(_icon_svg_bytes(kind, color)).render(
+        p, QRectF(x, x, icon_px, icon_px))
     p.end()
     return pm
 
@@ -229,9 +228,8 @@ class EqWidget(QWidget):
             p.setBrush(color)
             p.drawRoundedRect(int(x), int(top + bar_h - h), int(bw), int(h), bw / 2, bw / 2)
         p.setPen(self._c_subtext)
-        f = QFont()
+        f = QFont(app_font_family() or self.font().family())
         f.setPixelSize(12)
-        f.setStyleHint(QFont.TypeWriter)  # tabular digits for changing values
         p.setFont(f)
         p.drawText(margin, rect.height() - 10, self.elapsed_text)
         if self.status_text:
@@ -296,7 +294,7 @@ class PlayButton(QPushButton):
         self._c_fill = QColor(theme["accent"])
         self._c_pressed = QColor(theme["pressed"])
         self._c_ring = QPen(QColor(theme["accent_text"]), 2)
-        self._icons = {k: _pixmap(k, theme["on_accent"]) for k in ("play", "pause")}
+        self._icons = {k: _pixmap(k, theme["on_accent"], 64, 26 / 64) for k in ("play", "pause")}
         self.update()
 
     def paintEvent(self, event):
@@ -358,6 +356,9 @@ class Popup(QWidget):
     def __init__(self, player):
         super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        fam = app_font_family()
+        if fam:
+            self.setFont(QFont(fam))
         self.player = player
         # What the user last asked for; the engine may lag behind it (device
         # stalls, no audio device), so button state tracks this, not the engine.
@@ -519,17 +520,17 @@ class Popup(QWidget):
         self.eq._cache_colors()
         self.play_button.set_theme(t)
         self.title.setStyleSheet(
-            f"color: {t['text']}; font-size: 16px; font-weight: 600; background: transparent;")
+            f"{_font_css()}color: {t['text']}; font-size: 16px; font-weight: 600; background: transparent;")
         self.subtitle.setStyleSheet(
-            f"color: {t['subtext']}; font-size: 13px; background: transparent;")
+            f"{_font_css()}color: {t['subtext']}; font-size: 13px; background: transparent;")
         chevron = (f"QPushButton {{ color: {t['subtext']}; background: transparent;"
                    f" border: none; border-radius: 16px; }}"
                    f"QPushButton:hover {{ background: {t['hover']}; }}"
                    f"QPushButton:focus {{ border: 2px solid {t['accent_text']}; }}")
         self.prev_button.setStyleSheet(chevron)
         self.next_button.setStyleSheet(chevron)
-        self.prev_button.setIcon(QIcon(_pixmap("chevron-left", t["subtext"], 32)))
-        self.next_button.setIcon(QIcon(_pixmap("chevron-right", t["subtext"], 32)))
+        self.prev_button.setIcon(QIcon(_pixmap("chevron-left", t["subtext"], 32, 18 / 32)))
+        self.next_button.setIcon(QIcon(_pixmap("chevron-right", t["subtext"], 32, 18 / 32)))
         circle = (f"QPushButton {{ background: transparent; border: 1.5px solid {t['outline']};"
                   f" border-radius: 20px; }}"
                   f"QPushButton:hover {{ background: {t['hover']}; }}"
@@ -537,10 +538,10 @@ class Popup(QWidget):
                   f"QPushButton:checked {{ border-color: {t['accent']}; }}")
         self.restart_button.setStyleSheet(circle)
         self.settings_button.setStyleSheet(circle)
-        self.restart_button.setIcon(QIcon(_pixmap("restart", t["text"], 40)))
-        self.settings_button.setIcon(QIcon(_pixmap("gear", t["text"], 40)))
+        self.restart_button.setIcon(QIcon(_pixmap("restart", t["text"], 40, 20 / 40)))
+        self.settings_button.setIcon(QIcon(_pixmap("gear", t["text"], 40, 20 / 40)))
         self.settings.setStyleSheet(
-            f"QWidget {{ background: transparent; color: {t['text']}; font-size: 13px; }}"
+            f"QWidget {{ {_font_css()}background: transparent; color: {t['text']}; font-size: 13px; }}"
             f"QLabel {{ background: transparent; }}"
             f"QSlider::groove:horizontal {{ height: 4px; background: {t['outline']}; border-radius: 2px; }}"
             f"QSlider::handle:horizontal {{ width: 14px; height: 14px; margin: -5px 0;"
@@ -701,6 +702,9 @@ class Popup(QWidget):
 class TrayApp:
     def __init__(self):
         self.app = QApplication(sys.argv)
+        fam = app_font_family()
+        if fam:
+            self.app.setFont(QFont(fam))
         self.app.setApplicationName("dither")
         self.app.setQuitOnLastWindowClosed(False)
 

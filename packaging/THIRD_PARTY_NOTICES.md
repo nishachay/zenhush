@@ -4,8 +4,9 @@ This file ships with the dither test package. The application directory
 `dither/` is a PyInstaller one-directory build: the executable
 `dither/dither` loads shared libraries from `dither/_internal/`, where
 every library sits as a separate, directly replaceable file. Full
-license texts are in `licenses/`; corresponding-source details and the
-formal written offer are in `WRITTEN_OFFER.txt`.
+license texts are in `licenses/`. Corresponding-source arrangements for
+the LGPL libraries are tracked as open release work in LICENSE-AUDIT.md;
+no written offer is issued with this private test package.
 
 ## dither's own code and content
 - All application code (`dither_app/`, `run_dither.py`), tests and
@@ -23,8 +24,8 @@ formal written offer are in `WRITTEN_OFFER.txt`.
 - Qt is Copyright The Qt Company Ltd. and other contributors.
 - License texts: licenses/LGPL-3.0.txt plus licenses/GPL-3.0.txt
   (LGPL v3 applies GPL v3 with additional permissions).
-- Corresponding source: see WRITTEN_OFFER.txt (upstream Qt source URL
-  verified live 12 Nov 2026).
+- Corresponding source: open release work, see LICENSE-AUDIT.md
+  (upstream Qt source URL verified live 12 Nov 2026).
 
 ## FFmpeg 7.1.5 - GNU LGPL v2.1 or later
 - Used by Qt Multimedia's playback backend. Unmodified shared libraries:
@@ -33,8 +34,8 @@ formal written offer are in `WRITTEN_OFFER.txt`.
   Version confirmed from the "FFmpeg version 7.1.5" string embedded in
   the bundled libavcodec.
 - License text: licenses/LGPL-2.1.txt.
-- Corresponding source: see WRITTEN_OFFER.txt (ffmpeg.org release URL
-  verified live 12 Nov 2026).
+- Corresponding source: open release work, see LICENSE-AUDIT.md
+  (ffmpeg.org release URL verified live 12 Nov 2026).
 
 ## Python 3.10.12 runtime - PSF License
 - License text: licenses/PSF-Python-3.10-LICENSE.txt.
@@ -51,3 +52,17 @@ run `dither/dither`. Alternatively, install your own Qt/FFmpeg
 (`pip install PySide6==6.11.3` or a custom build) and run the app from
 `source/` with `python3 run_dither.py`; the source run links whatever
 Qt/FFmpeg you installed.
+
+## Schibsted Grotesk (UI font) - SIL Open Font License 1.1
+- Source: google/fonts repository, ofl/schibstedgrotesk (project:
+  github.com/schibsted/schibsted-grotesk).
+- Bundled unmodified at dither_app/assets/fonts/SchibstedGrotesk.ttf
+  (variable font, Regular-Black); OFL text beside it at
+  dither_app/assets/fonts/OFL.txt. OFL 1.1 permits this bundling.
+
+## Lucide (UI icons) - ISC License
+- Source: github.com/lucide-icons/lucide
+  (icons: play, pause, rotate-ccw, settings, chevron-left, chevron-right).
+- Recolored at render time via currentColor; play/pause additionally
+  filled for the solid-button style. No shape edits.
+- ISC text bundled at dither_app/assets/icons/LICENSE-lucide.

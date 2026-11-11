@@ -40,9 +40,11 @@ no distribution has happened.
 ## What the test package ships (shipped 12 Nov 2026)
 - One-directory PyInstaller build: Qt/FFmpeg shared libraries are
   directly replaceable files in dither/_internal/.
-- Full license texts (GPL-3.0, LGPL-3.0, LGPL-2.1, PSF, PyInstaller),
-  THIRD_PARTY_NOTICES.md, and WRITTEN_OFFER.txt with upstream
-  corresponding-source URLs verified live, plus a 3-year written offer.
+- Full license texts (GPL-3.0, LGPL-3.0, LGPL-2.1, PSF, PyInstaller)
+  and THIRD_PARTY_NOTICES.md. Upstream corresponding-source URLs were
+  verified live; a written offer is NOT issued with this private test
+  package - corresponding-source arrangements are item 2 in the gaps
+  below and stay open until a release decision.
 - dither's own source included under source/ (private share, no public
   license selected yet).
 
