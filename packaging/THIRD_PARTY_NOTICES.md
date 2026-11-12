@@ -47,7 +47,7 @@ license texts are in `licenses/`.
 - License texts: licenses/LGPL-3.0.txt plus licenses/GPL-3.0.txt.
 - Corresponding source: the complete PySide6/Shiboken 6.11.3 source
   (pyside-setup, including build scripts) is available at no charge from
-  https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.11.3-src/
+  https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.11.3-src/pyside-setup-everywhere-src-6.11.3.zip
   (directory verified live 12 Nov 2026). Replaceable the same way as Qt:
   drop rebuilt files into `zenhush/_internal/`, or
   `pip install PySide6==6.11.3` and run from `source/`.
