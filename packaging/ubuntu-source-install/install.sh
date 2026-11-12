@@ -34,10 +34,10 @@ echo "Copying Zenhush to $APP_DIR ..."
 rm -rf "$APP_DIR/zenhush" "$APP_DIR/venv"
 cp -r src/zenhush "$APP_DIR/zenhush"
 
-echo "Creating its Python environment (downloads Qt for Python ~100 MB once) ..."
+echo "Creating its Python environment (downloads Qt for Python ~245 MB once) ..."
 python3 -m venv "$APP_DIR/venv"
-"$APP_DIR/venv/bin/pip" install --quiet --upgrade pip
-"$APP_DIR/venv/bin/pip" install --quiet PySide6-Essentials==6.11.3 PySide6-Addons==6.11.3
+"$APP_DIR/venv/bin/pip" install --upgrade pip
+"$APP_DIR/venv/bin/pip" install PySide6-Essentials==6.11.3 PySide6-Addons==6.11.3
 
 mkdir -p "$HOME/.local/share/applications"
 cat > "$HOME/.local/share/applications/zenhush.desktop" <<DESKTOP

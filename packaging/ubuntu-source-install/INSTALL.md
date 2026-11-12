@@ -24,7 +24,7 @@ PyPI (Qt's own distribution).
 ## Requirements
 
 - Ubuntu/Debian with apt; Python 3.9+ (present on Ubuntu 20.04+).
-- Internet once, for the ~100 MB Qt for Python download (pinned:
+- Internet once, for the ~245 MB Qt for Python download (pinned:
   PySide6-Essentials==6.11.3, PySide6-Addons==6.11.3).
 - A system tray / app-indicator host for the tray icon. Without one the
   app falls back to a small normal window - everything still works.
