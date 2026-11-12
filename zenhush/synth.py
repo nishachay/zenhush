@@ -1,8 +1,11 @@
 """Continuous live sound synthesis for Zenhush.
 
-The app never plays a file. A LiveSource synthesizes fresh random samples
-forever, shapes them with filters, and streams them straight to the audio
-output: the sound is made right now, it never ends and it never repeats.
+The noise sources never play a file. A LiveSource synthesizes fresh
+random samples forever, shapes them with filters, and streams them
+straight to the audio output: the sound is made right now, it never ends
+and it never repeats. A FileSource (below) is the one exception: it loops
+the user's own local audio file through the same live filter chain, and
+the app always labels that mode "File", never "Live".
 
 Parameter behaviour mirrors the original web preview (Muse handover,
 Roma TASK-4): brown noise made live, defaults Volume 70 (gain 0.44),
@@ -152,6 +155,8 @@ class LiveSource(QIODevice):
         self._lock = threading.Lock()
         self._sound = sound
         self._voice = _Voice(random.Random(self._seed()))
+        self._uniform = self._voice.rng.random
+        self._out_gain = OUTPUT_GAIN.get(sound, 1.0)
         # depth: one-pole lowpass coefficient
         self._depth_a = 1.0
         self._depth_state = 0.0
@@ -192,6 +197,8 @@ class LiveSource(QIODevice):
         with self._lock:
             self._sound = name
             self._voice = _Voice(random.Random(self._seed()))
+            self._uniform = self._voice.rng.random
+            self._out_gain = OUTPUT_GAIN.get(name, 1.0)
             self._depth_state = 0.0
             self._rumble_state = 0.0
             self._fade_left = self.FADE_SAMPLES
@@ -230,21 +237,22 @@ class LiveSource(QIODevice):
 
     # -- synthesis -----------------------------------------------------
 
+    def _produce(self):
+        """Next raw sample before the filter chain. LiveSource synthesizes
+        fresh noise; FileSource overrides this to read its looped file."""
+        return self._voice.next(self._sound, self._uniform)
+
     def readData(self, maxlen):
         n = maxlen // 2  # 16-bit mono
         if n <= 0:
             return b""
-        with self._lock:
-            kind = self._sound
-            voice = self._voice
-        gain = OUTPUT_GAIN.get(kind, 1.0)
-        uniform = voice.rng.random
+        gain = self._out_gain
+        produce = self._produce
         depth_a = self._depth_a
         depth_s = self._depth_state
         rumble_a = self._rumble_a
         rumble_g = self._rumble_gain
         rumble_s = self._rumble_state
-        nxt = voice.next
         limited = 0
         kneed = 0
         vol = self._volume
@@ -258,7 +266,7 @@ class LiveSource(QIODevice):
         ring = self._rms_ring
         chunk = _CHUNK
         for i in range(n):
-            x = nxt(kind, uniform)
+            x = produce()
             depth_s += depth_a * (x - depth_s)
             rumble_s += rumble_a * (x - rumble_s)
             v = (depth_s + rumble_s * rumble_g) * gain * vol
@@ -298,3 +306,43 @@ class LiveSource(QIODevice):
 
     def writeData(self, data):
         return -1
+
+
+class FileSource(LiveSource):
+    """Loops one decoded local audio file through the same live chain.
+
+    The user's own file, decoded on the device (audiofile.decode) to mono
+    float PCM and looped sample-exactly: the read position wraps with no
+    gap and no fade at the seam. Unlike the noise sources this IS a
+    recording, so the app labels it "File", never "Live". Depth, Rumble
+    and Volume apply exactly as they do to noise, and the same peak knee
+    bounds the output.
+    """
+
+    def __init__(self, samples, parent=None):
+        super().__init__("brown", parent)
+        if not samples:
+            raise ValueError("FileSource needs at least one sample")
+        self._samples = samples  # array('f'), mono, SAMPLE_RATE
+        self._pos = 0
+        self._out_gain = 1.0  # respect the file's own level; volume is the user's control
+
+    def _produce(self):
+        s = self._samples
+        v = s[self._pos]
+        self._pos += 1
+        if self._pos == len(s):
+            self._pos = 0  # sample-exact wrap: gapless by construction
+        return v
+
+    def set_sound(self, name):
+        raise RuntimeError("FileSource loops the user's file, not noise recipes")
+
+    def restart(self):
+        """Rewind to the start of the file with a gentle fade-in."""
+        with self._lock:
+            self._pos = 0
+            self._depth_state = 0.0
+            self._rumble_state = 0.0
+            self._rms_ring.clear()
+            self._fade_left = self.FADE_SAMPLES

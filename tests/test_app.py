@@ -35,7 +35,7 @@ def main():
     popup = Popup(player)
 
     # Structure
-    check("sound order matches engine", popup.sounds == list(noise_gen.SOUNDS))
+    check("sound order matches engine plus file entry", popup.sounds == list(noise_gen.SOUNDS) + ["file"])
     check("play button is a 64px filled circle", popup.play_button.width() == 64
           and isinstance(popup.play_button, PlayButton))
     check("play mode starts as 'play'", popup.play_button.mode == "play")
@@ -56,8 +56,11 @@ def main():
     popup._step_sound(-1)
     check("chevron back", popup.selected_sound == "brown")
     popup._step_sound(-1)
-    check("chevron wraps around", popup.selected_sound == "ocean")
+    check("chevron wraps around", popup.selected_sound == "file")
+    popup._step_sound(-1)
+    check("chevron wraps past file to ocean", popup.selected_sound == "ocean")
     popup._step_sound(1)
+    popup._step_sound(1)  # back to brown
 
     # Play the selected sound
     popup._toggle_play()

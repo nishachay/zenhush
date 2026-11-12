@@ -19,11 +19,12 @@ from PySide6.QtGui import (QAction, QBrush, QColor, QCursor, QFont,
                            QPainterPath, QPen, QPixmap)
 from PySide6.QtMultimedia import QAudio, QAudioFormat, QAudioSink
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel,
-                               QMenu, QPushButton, QSlider, QSizePolicy,
-                               QSystemTrayIcon, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QLabel,
+                               QMenu, QMessageBox, QPushButton, QSlider,
+                               QSizePolicy, QSystemTrayIcon, QVBoxLayout,
+                               QWidget)
 
-from . import noise_gen, synth
+from . import audiofile, noise_gen, synth
 
 ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "zenhush")
@@ -69,7 +70,7 @@ THEMES = {
         "bar": "#DDD5C7", "bar_strong": "#3B352C",
         "accent": "#C8823E", "accent_text": "#8F5B1E", "on_accent": "#FFFFFF",
         "outline": "#DCD4C6", "edge": (0, 0, 0, 18), "hover": "#EFE9DF",
-        "field": "#F0EBE2", "pressed": "#A96E33",
+        "field": "#F0EBE2", "pressed": "#A96E33", "switch_off": "#D9D0C0",
     },
     "dark": {
         "window": "#100E0C", "card": "#0B0A08", "inset": "#221E19",
@@ -77,15 +78,16 @@ THEMES = {
         "bar": "#3A332B", "bar_strong": "#E8E1D4",
         "accent": "#C8823E", "accent_text": "#DDA266", "on_accent": "#FFFFFF",
         "outline": "#3A332B", "edge": (255, 255, 255, 16), "hover": "#1D1A15",
-        "field": "#221E19", "pressed": "#A96E33",
+        "field": "#221E19", "pressed": "#A96E33", "switch_off": "#4A4238",
     },
 }
 
 SOUND_TITLES = {"brown": "Brown Noise", "white": "White Noise", "pink": "Pink Noise",
-                "rain": "Rain", "ocean": "Ocean"}
+                "rain": "Rain", "ocean": "Ocean", "file": "Your File"}
 SOUND_SUBTITLES = {"brown": "deep and warm", "white": "bright and even",
                    "pink": "soft and balanced", "rain": "steady rainfall",
                    "ocean": "slow waves"}
+FILE_SUBTITLE_IDLE = "loop a local audio file"
 IDLE_SUBTITLE = "press play to focus"
 
 
@@ -265,11 +267,11 @@ class Segmented(QWidget):
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(t["field"]))
         p.drawRoundedRect(0, 0, w, h, h / 2, h / 2)
-        # thumb
+        # thumb: solid accent, one active language across the whole app
         inset = 3
         tx = self._pos * seg + inset
-        p.setBrush(QColor(t["card"]))
-        p.setPen(QPen(QColor(*t["edge"]), 1))
+        p.setBrush(QColor(t["accent"]))
+        p.setPen(Qt.NoPen)
         p.drawRoundedRect(QRectF(tx, inset, seg - 2 * inset, h - 2 * inset),
                           (h - 2 * inset) / 2, (h - 2 * inset) / 2)
         # labels
@@ -278,7 +280,7 @@ class Segmented(QWidget):
         p.setFont(f)
         for i, (_, _, disp) in enumerate(self._items):
             if i == self._index:
-                p.setPen(QColor(t["text"]))
+                p.setPen(QColor(t["on_accent"]))
             elif i == self._hover:
                 p.setPen(QColor(t["text"]))
             else:
@@ -368,8 +370,8 @@ class Toggle(QWidget):
         on = self._pos
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        # track: field -> accent blend
-        off_c, on_c = QColor(t["outline"]), QColor(t["accent"])
+        # track: visible off-state -> accent blend
+        off_c, on_c = QColor(t["switch_off"]), QColor(t["accent"])
         track = QColor(
             int(off_c.red() + (on_c.red() - off_c.red()) * on),
             int(off_c.green() + (on_c.green() - off_c.green()) * on),
@@ -573,12 +575,14 @@ class PlayButton(QPushButton):
 
 
 class Player:
-    """Continuous live synthesis streamed to the speakers.
+    """Plays the selected source: live synthesis, or the user's looped file.
 
-    No audio file is ever played: LiveSource generates fresh filtered
-    random noise forever and QAudioSink pulls it in real time, so the
-    sound is made right now, never ends and never repeats. Volume,
-    Depth and Rumble retune the stream live while it plays.
+    Noise mode: LiveSource generates fresh filtered random noise forever
+    and QAudioSink pulls it in real time, so the sound is made right now,
+    never ends and never repeats. File mode: FileSource loops the user's
+    own decoded file through the same chain (the UI labels it "File",
+    never "Live"). Volume, Depth and Rumble retune the active stream live
+    while it plays.
     """
 
     def __init__(self):
@@ -586,18 +590,38 @@ class Player:
         fmt.setSampleRate(synth.SAMPLE_RATE)
         fmt.setChannelCount(synth.CHANNELS)
         fmt.setSampleFormat(QAudioFormat.Int16)
-        self.source = synth.LiveSource()
+        self.live = synth.LiveSource()
+        self.file = None
+        self.source = self.live
         self.sink = QAudioSink(fmt)
         self._started = False
         self.current = None
+        self.current_kind = None  # "noise" or "file"
 
-    def play_sound(self, name):
-        self.source.set_sound(name)
-        self.current = name
+    def _drive(self, source):
+        """Point the sink at source (starting it if needed) and resume."""
+        if self.source is not source:
+            if self._started:
+                self.sink.stop()
+            self.source = source
+            self._started = False
         if not self._started:
             self.sink.start(self.source)
             self._started = True
         self.sink.resume()
+
+    def play_sound(self, name):
+        self.live.set_sound(name)
+        self.current = name
+        self.current_kind = "noise"
+        self._drive(self.live)
+
+    def play_file(self, samples):
+        """Loop the user's decoded file (array('f') from audiofile.decode)."""
+        self.file = synth.FileSource(samples)
+        self.current = "file"
+        self.current_kind = "file"
+        self._drive(self.file)
 
     def pause(self):
         self.sink.suspend()
@@ -608,7 +632,8 @@ class Player:
             self.sink.resume()
 
     def restart(self):
-        """Fresh noise from a new seed; a restart never replays anything."""
+        """Noise: fresh stream from a new seed, never a replay.
+        File: rewind the user's file to the start."""
         self.source.restart()
         self.sink.resume()
 
@@ -636,7 +661,7 @@ class Popup(QWidget):
     """The compact control panel, following the user's reference design."""
 
     BASE_HEIGHT = 296
-    SETTINGS_HEIGHT = 276
+    SETTINGS_HEIGHT = 336
 
     def __init__(self, player):
         super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
@@ -649,8 +674,10 @@ class Popup(QWidget):
         # stalls, no audio device), so button state tracks this, not the engine.
         self.is_playing = False
         self._settings_open = False
-        self.sounds = list(noise_gen.SOUNDS)
+        self.sounds = list(noise_gen.SOUNDS) + ["file"]
         self.selected_index = 0
+        self.file_path = None      # user's chosen loop file (this session)
+        self.file_samples = None
         self.current_theme = "dark"
         self.theme_mode = "Auto"
         self.reduce_motion = False
@@ -714,76 +741,103 @@ class Popup(QWidget):
         button_row.addStretch(1)
         layout.addLayout(button_row)
 
-        # Settings: secondary controls live behind the disclosure.
+        # Settings: secondary controls live behind the disclosure, grouped
+        # into Sound / Sleep timer / Appearance sections.
         self.settings = QWidget()
         s_layout = QVBoxLayout(self.settings)
-        s_layout.setContentsMargins(4, 14, 4, 0)
-        s_layout.setSpacing(12)
+        s_layout.setContentsMargins(4, 12, 4, 0)
+        s_layout.setSpacing(8)
 
-        def _row(label):
+        def _header(text):
+            lab = QLabel(text)
+            lab.setObjectName("section")
+            return lab
+
+        def _text_button(text, tip):
+            b = QPushButton(text)
+            b.setObjectName("textbtn")
+            b.setCursor(Qt.PointingHandCursor)
+            b.setToolTip(tip)
+            return b
+
+        def _slider_row(label, value, tip, changed):
             row = QHBoxLayout()
+            row.setSpacing(8)
             lab = QLabel(label)
+            lab.setFixedWidth(52)
             row.addWidget(lab)
-            row.addStretch(1)
-            return row
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(0, 100)
+            slider.setValue(value)
+            slider.setAccessibleName(label)
+            slider.setToolTip(tip)
+            val = QLabel(str(value))
+            val.setObjectName("svalue")
+            val.setFixedWidth(24)
+            val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            slider.valueChanged.connect(lambda v, val=val: val.setText(str(v)))
+            slider.valueChanged.connect(changed)
+            row.addWidget(slider, 1)
+            row.addWidget(val)
+            s_layout.addLayout(row)
+            return slider
 
-        vol_row = _row("Volume")
-        self.volume = QSlider(Qt.Horizontal)
-        self.volume.setRange(0, 100)
-        self.volume.setValue(70)
-        self.volume.setAccessibleName("Volume")
-        self.volume.valueChanged.connect(self.player.set_volume)
-        vol_row.addWidget(self.volume, 2)
-        s_layout.addLayout(vol_row)
-
-        depth_row = _row("Depth")
-        self.depth = QSlider(Qt.Horizontal)
-        self.depth.setRange(0, 100)
-        self.depth.setValue(synth.DEFAULT_DEPTH)
-        self.depth.setAccessibleName("Depth")
-        self.depth.setToolTip("How dark the sound is: higher cuts more highs")
-        self.depth.valueChanged.connect(self.player.set_depth)
-        depth_row.addWidget(self.depth, 2)
-        s_layout.addLayout(depth_row)
-
-        rumble_row = _row("Rumble")
-        self.rumble = QSlider(Qt.Horizontal)
-        self.rumble.setRange(0, 100)
-        self.rumble.setValue(synth.DEFAULT_RUMBLE)
-        self.rumble.setAccessibleName("Rumble")
-        self.rumble.setToolTip("Sub-bass boost")
-        self.rumble.valueChanged.connect(self.player.set_rumble)
-        rumble_row.addWidget(self.rumble, 2)
-        s_layout.addLayout(rumble_row)
-
-        reset_row = QHBoxLayout()
-        reset_row.addStretch(1)
-        self.reset_button = QPushButton("Reset sound")
+        # --- Sound ---
+        sound_head = QHBoxLayout()
+        sound_head.addWidget(_header("SOUND"))
+        sound_head.addStretch(1)
+        self.reset_button = _text_button("Reset", "Back to Volume 70, Depth 65, Rumble 58")
         self.reset_button.setAccessibleName("Reset volume, depth and rumble to defaults")
-        self.reset_button.setToolTip("Back to Volume 70, Depth 65, Rumble 58")
         self.reset_button.clicked.connect(self._reset_sound_controls)
-        reset_row.addWidget(self.reset_button)
-        s_layout.addLayout(reset_row)
+        sound_head.addWidget(self.reset_button)
+        s_layout.addLayout(sound_head)
 
-        timer_row = _row("Sleep timer")
+        self.volume = _slider_row("Volume", 70, "", self.player.set_volume)
+        self.depth = _slider_row("Depth", synth.DEFAULT_DEPTH,
+                                 "How dark the sound is: higher cuts more highs",
+                                 self.player.set_depth)
+        self.rumble = _slider_row("Rumble", synth.DEFAULT_RUMBLE,
+                                  "Sub-bass boost", self.player.set_rumble)
+
+        file_row = QHBoxLayout()
+        file_row.setSpacing(8)
+        file_lab = QLabel("File")
+        file_lab.setFixedWidth(52)
+        file_row.addWidget(file_lab)
+        self.file_label = QLabel("None")
+        self.file_label.setObjectName("svalue")
+        self.file_label.setToolTip("No file chosen")
+        file_row.addWidget(self.file_label, 1)
+        self.file_button = _text_button(
+            "Choose\u2026", "Loop a local audio file (wav, mp3, flac, ogg, m4a)")
+        self.file_button.setAccessibleName("Choose an audio file to loop")
+        self.file_button.clicked.connect(self._choose_and_play_file)
+        file_row.addWidget(self.file_button)
+        s_layout.addLayout(file_row)
+
+        # --- Sleep timer ---
+        s_layout.addSpacing(6)
+        s_layout.addWidget(_header("SLEEP TIMER (MIN)"))
         self.timer_box = Segmented(THEMES[self._resolved_theme()], "Sleep timer")
         for label, minutes in TIMER_CHOICES:
             short = "Off" if minutes == 0 else str(minutes)
             self.timer_box.addItem(label, minutes, short)
             self.timer_box.setToolTip("Sleep timer: " + ", ".join(l for l, _ in TIMER_CHOICES))
         self.timer_box.currentIndexChanged.connect(self._timer_changed)
-        timer_row.addWidget(self.timer_box, 2)
-        s_layout.addLayout(timer_row)
+        s_layout.addWidget(self.timer_box)
 
-        look_row = _row("Appearance")
+        # --- Appearance ---
+        s_layout.addSpacing(6)
+        s_layout.addWidget(_header("APPEARANCE"))
         self.theme_box = Segmented(THEMES[self._resolved_theme()], "Appearance")
         for label in THEME_CHOICES:
             self.theme_box.addItem(label)
         self.theme_box.currentIndexChanged.connect(self._theme_changed)
-        look_row.addWidget(self.theme_box, 2)
-        s_layout.addLayout(look_row)
+        s_layout.addWidget(self.theme_box)
 
-        motion_row = _row("Reduce motion")
+        motion_row = QHBoxLayout()
+        motion_row.addWidget(QLabel("Reduce motion"))
+        motion_row.addStretch(1)
         self.motion_box = Toggle(THEMES[self._resolved_theme()], "Reduce motion")
         self.motion_box.addItem("Off")
         self.motion_box.addItem("On")
@@ -801,7 +855,8 @@ class Popup(QWidget):
         QWidget.setTabOrder(self.settings_button, self.volume)
         QWidget.setTabOrder(self.volume, self.depth)
         QWidget.setTabOrder(self.depth, self.rumble)
-        QWidget.setTabOrder(self.rumble, self.reset_button)
+        QWidget.setTabOrder(self.rumble, self.file_button)
+        QWidget.setTabOrder(self.file_button, self.reset_button)
         QWidget.setTabOrder(self.reset_button, self.timer_box)
         QWidget.setTabOrder(self.timer_box, self.theme_box)
         QWidget.setTabOrder(self.theme_box, self.motion_box)
@@ -860,21 +915,29 @@ class Popup(QWidget):
         self.next_button.setIcon(QIcon(_pixmap("chevron-right", t["subtext"], 32, 18 / 32)))
         self.prev_button.setIconSize(QSize(32, 32))
         self.next_button.setIconSize(QSize(32, 32))
-        circle = (f"QPushButton {{ background: transparent; border: 1.5px solid {t['outline']};"
-                  f" border-radius: 20px; }}"
-                  f"QPushButton:hover {{ background: {t['hover']}; }}"
-                  f"QPushButton:pressed {{ background: {t['field']}; }}"
-                  f"QPushButton:focus {{ border: 2px solid {t['accent_text']}; }}"
-                  f"QPushButton:checked {{ border-color: {t['accent']}; }}")
-        self.restart_button.setStyleSheet(circle)
-        self.settings_button.setStyleSheet(circle)
-        self.restart_button.setIcon(QIcon(_pixmap("restart", t["text"], 40, 20 / 40)))
-        self.settings_button.setIcon(QIcon(_pixmap("gear", t["text"], 40, 20 / 40)))
+        # Bare icon buttons: play is the only filled circle (the hero),
+        # restart/settings are quiet glyphs, like the reference.
+        bare = (f"QPushButton {{ background: transparent; border: none;"
+                f" border-radius: 20px; }}"
+                f"QPushButton:hover {{ background: {t['hover']}; }}"
+                f"QPushButton:pressed {{ background: {t['field']}; }}"
+                f"QPushButton:focus {{ border: 2px solid {t['accent_text']}; }}")
+        self.restart_button.setStyleSheet(bare)
+        self.settings_button.setStyleSheet(bare)
+        gear_color = t["accent"] if self.settings_button.isChecked() else t["subtext"]
+        self.restart_button.setIcon(QIcon(_pixmap("restart", t["subtext"], 40, 20 / 40)))
+        self.settings_button.setIcon(QIcon(_pixmap("gear", gear_color, 40, 20 / 40)))
         self.restart_button.setIconSize(QSize(40, 40))
         self.settings_button.setIconSize(QSize(40, 40))
         self.settings.setStyleSheet(
             f"QWidget {{ {_font_css()}background: transparent; color: {t['text']}; font-size: 13px; }}"
             f"QLabel {{ background: transparent; }}"
+            f"QLabel#section {{ color: {t['subtext']}; font-size: 11px; font-weight: 600; }}"
+            f"QLabel#svalue {{ color: {t['subtext']}; }}"
+            f"QPushButton#textbtn {{ color: {t['accent_text']}; background: transparent;"
+            f" border: none; font-size: 12px; padding: 2px 4px; }}"
+            f"QPushButton#textbtn:hover {{ color: {t['accent']}; }}"
+            f"QPushButton#textbtn:focus {{ border: 1px solid {t['accent_text']}; border-radius: 4px; }}"
             f"QSlider::groove:horizontal {{ height: 4px; background: {t['outline']}; border-radius: 2px; }}"
             f"QSlider::handle:horizontal {{ width: 16px; height: 16px; margin: -6px 0;"
             f" border-radius: 8px; background: {t['accent']}; }}"
@@ -906,21 +969,81 @@ class Popup(QWidget):
     def selected_sound(self):
         return self.sounds[self.selected_index]
 
+    def _subtitle_for(self, name):
+        if name == "file":
+            if self.file_path:
+                base = os.path.basename(self.file_path)
+                return base if len(base) <= 30 else base[:27] + "\u2026"
+            return FILE_SUBTITLE_IDLE
+        return SOUND_SUBTITLES[name]
+
+    def _push_controls(self):
+        """Re-apply the current slider values to a freshly created source."""
+        self.player.set_volume(self.volume.value())
+        self.player.set_depth(self.depth.value())
+        self.player.set_rumble(self.rumble.value())
+        self.eq.source = self.player.source.rms_values  # real output energy
+
+    def _choose_file(self):
+        """Pick and decode a local audio file. Returns True when loaded."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose an audio file to loop", "", audiofile.dialog_filter())
+        if not path:
+            return False
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            samples = audiofile.decode(path)
+        except audiofile.AudioFileError as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Cannot loop that file", str(e))
+            return False
+        QApplication.restoreOverrideCursor()
+        self.file_path = path
+        self.file_samples = samples
+        base = os.path.basename(path)
+        self.file_label.setText(base if len(base) <= 20 else base[:17] + "\u2026")
+        self.file_label.setToolTip(path)
+        return True
+
+    def _choose_and_play_file(self):
+        if self._choose_file():
+            self._pick_sound("file")
+
     def _step_sound(self, delta):
         self.selected_index = (self.selected_index + delta) % len(self.sounds)
         self.title.setText(SOUND_TITLES[self.selected_sound])
         if self.is_playing:
             # Switching mid-play changes the sound seamlessly.
-            self.player.play_sound(self.selected_sound)
+            if self.selected_sound == "file":
+                if self.file_path is None:
+                    # No file chosen yet: keep the noise that is playing;
+                    # pressing play on "Your File" opens the picker.
+                    self._render_status()
+                    return
+                self.player.play_file(self.file_samples)
+                self._push_controls()
+            else:
+                self.player.play_sound(self.selected_sound)
             self.elapsed_seconds = 0
             self._render_elapsed()
+            self._render_status()
         else:
-            self.subtitle.setText(SOUND_SUBTITLES[self.selected_sound])
+            self.subtitle.setText(self._subtitle_for(self.selected_sound))
 
     def _pick_sound(self, name):
+        if name == "file" and self.file_path is None:
+            if not self._choose_file():
+                # Dialog cancelled or undecodable: stay where we were.
+                self.title.setText(SOUND_TITLES[self.selected_sound])
+                self.subtitle.setText(self._subtitle_for(self.selected_sound))
+                return
         self.selected_index = self.sounds.index(name)
         self.title.setText(SOUND_TITLES[name])
-        self.player.play_sound(name)
+        if name == "file":
+            self.player.play_file(self.file_samples)
+            self._push_controls()
+        else:
+            self.player.play_sound(name)
         self._entered_playing()
 
     # ----- playback -----
@@ -928,7 +1051,7 @@ class Popup(QWidget):
     def _entered_playing(self):
         self.is_playing = True
         self.play_button.set_mode("pause")
-        self.subtitle.setText(SOUND_SUBTITLES[self.selected_sound])
+        self.subtitle.setText(self._subtitle_for(self.selected_sound))
         self.eq.set_playing(True)
         self._render_status()
         self.elapsed_seconds = 0
@@ -983,7 +1106,13 @@ class Popup(QWidget):
         if self.sleep_timer.isActive():
             self._update_countdown()
         else:
-            self.eq.status_text = "Live" if self.is_playing else "Paused"
+            if not self.is_playing:
+                self.eq.status_text = "Paused"
+            elif self.player.current_kind == "file":
+                # A looped recording is never labelled "Live".
+                self.eq.status_text = "File"
+            else:
+                self.eq.status_text = "Live"
             self.eq.update()
 
     def _reset_sound_controls(self):
@@ -1023,6 +1152,8 @@ class Popup(QWidget):
         self._settings_open = on
         self.settings.setVisible(on)
         self.settings_button.setAccessibleName("Close settings" if on else "Open settings")
+        self.settings_button.setIcon(QIcon(_pixmap(
+            "gear", self.theme["accent"] if on else self.theme["subtext"], 40, 20 / 40)))
         self._set_fixed_height()
 
     def _motion_changed(self):
