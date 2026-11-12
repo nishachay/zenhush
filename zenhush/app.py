@@ -931,7 +931,7 @@ class Popup(QWidget):
         self.settings_button.setIconSize(QSize(40, 40))
         self.settings.setStyleSheet(
             f"QWidget {{ {_font_css()}background: transparent; color: {t['text']}; font-size: 13px; }}"
-            f"QLabel {{ background: transparent; }}"
+            f"QLabel {{ background: transparent; color: {t['text']}; }}"
             f"QLabel#section {{ color: {t['subtext']}; font-size: 11px; font-weight: 600; }}"
             f"QLabel#svalue {{ color: {t['subtext']}; }}"
             f"QPushButton#textbtn {{ color: {t['accent_text']}; background: transparent;"
@@ -944,6 +944,11 @@ class Popup(QWidget):
             f"QSlider::handle:horizontal:hover {{ background: {t['pressed']}; }}"
             f"QSlider::handle:horizontal:pressed {{ background: {t['pressed']}; }}"
             f"QSlider::sub-page:horizontal {{ background: {t['accent']}; border-radius: 2px; }}")
+        # Qt propagates a container stylesheet to hidden descendants lazily and can
+        # leave them one theme behind; force a re-polish so colors apply now.
+        for w in [self.settings] + self.settings.findChildren(QWidget):
+            self.settings.style().unpolish(w)
+            self.settings.style().polish(w)
         self.timer_box.set_theme(t)
         self.theme_box.set_theme(t)
         self.motion_box.set_theme(t)
