@@ -3,7 +3,9 @@ Zenhush - Linux test build (private, not for public distribution)
 What this is
   Zenhush - noise for focus and rest. A tiny noise machine for your
   top bar. Tray icon + popup with
-  5 synthesized sounds (brown, white, pink, rain, ocean), volume, sleep
+  5 synthesized sounds (brown, white, pink, rain, ocean) generated live
+  (never a file, never ends, never repeats), a loop mode for your own
+  local audio file (wav/mp3/flac/ogg/m4a), volume, depth, rumble, sleep
   timer, restart. One-directory build, nothing to install.
 
 Tested environment (what this build was actually verified on)
@@ -46,7 +48,11 @@ Third-party components and licenses
   Zenhush's own source is included under source/.
 
 Status
-  Private test build. Test totals: 128 checks (31 synthesis, 68 app, 29
-  noise) pass against the same code as this binary; the frozen binary's
-  PCM output was verified against a source run. Not yet: Windows/macOS,
-  icon pixels inside a real desktop panel.
+  Private test build. Test totals: 157 checks (31 synthesis, 69 app, 29
+  noise, 28 file-mode) pass against the same code as this binary; the
+  frozen binary's PCM output was verified against a source run, and the
+  file loop was captured across wraps with no silent window at the seam.
+  Note: lossy files can carry encoder padding (m4a measured ~20ms), so
+  some files may have a faint seam edge - that lives in the file, not
+  the loop. Not yet: Windows/macOS builds, icon pixels inside a real
+  desktop panel (icon design still under review).
