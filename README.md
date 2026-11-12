@@ -1,5 +1,7 @@
 # Zenhush
 
+Noise for focus and rest.
+
 A tiny noise machine for your top bar.
 
 Zenhush plays locally synthesized noise (brown, white, pink, rain, ocean)

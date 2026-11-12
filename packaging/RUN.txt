@@ -1,7 +1,8 @@
 Zenhush - Linux test build (private, not for public distribution)
 
 What this is
-  Zenhush: a tiny noise machine for your top bar. Tray icon + popup with
+  Zenhush - noise for focus and rest. A tiny noise machine for your
+  top bar. Tray icon + popup with
   5 synthesized sounds (brown, white, pink, rain, ocean), volume, sleep
   timer, restart. One-directory build, nothing to install.
 
