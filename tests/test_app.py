@@ -1,4 +1,4 @@
-"""Automated UI checks for the dither Qt app.
+"""Automated UI checks for the Zenhush Qt app.
 
 Run: python3 tests/test_app.py
 Uses Qt's offscreen platform - no display needed. Checks widget structure,
@@ -14,9 +14,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
-from dither_app import noise_gen
-from dither_app import synth
-from dither_app.app import (CACHE_DIR, THEMES, TIMER_CHOICES, EqWidget, PlayButton,
+from zenhush import noise_gen
+from zenhush import synth
+from zenhush.app import (CACHE_DIR, THEMES, TIMER_CHOICES, EqWidget, PlayButton,
                             Popup, Player, app_font_family, contrast_ratio)
 
 FAILURES = []
@@ -198,7 +198,7 @@ def main():
     popup.eq.set_playing(True); popup.eq.set_playing(False)
 
     # Custom settings controls: segmented + toggle behave like the combos they replaced
-    from dither_app.app import Segmented, Toggle
+    from zenhush.app import Segmented, Toggle
     check("sleep timer is a segmented control", isinstance(popup.timer_box, Segmented))
     check("appearance is a segmented control", isinstance(popup.theme_box, Segmented))
     check("reduce motion is a toggle", isinstance(popup.motion_box, Toggle))

@@ -1,4 +1,4 @@
-"""Continuous live sound synthesis for dither.
+"""Continuous live sound synthesis for Zenhush.
 
 The app never plays a file. A LiveSource synthesizes fresh random samples
 forever, shapes them with filters, and streams them straight to the audio

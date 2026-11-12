@@ -13,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 app = QApplication.instance() or QApplication([])
-from dither_app import synth
+from zenhush import synth
 
 FAILURES = []
 

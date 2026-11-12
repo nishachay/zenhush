@@ -1,8 +1,8 @@
-# Packaging dither
+# Packaging Zenhush
 
 Status: TEMPLATES ONLY. No binaries have been built from these yet.
 
-- `dither.spec` - PyInstaller spec: one-file, windowed, brand icon.
+- `zenhush.spec` - PyInstaller spec: one-file, windowed, brand icon.
 - `../.github/workflows/build.yml` - CI template: runs both test suites on
   ubuntu/windows/macos runners, then builds and uploads a per-OS binary.
 

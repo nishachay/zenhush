@@ -1,8 +1,8 @@
-# dither
+# Zenhush
 
 A tiny noise machine for your top bar.
 
-dither plays locally synthesized noise (brown, white, pink, rain, ocean)
+Zenhush plays locally synthesized noise (brown, white, pink, rain, ocean)
 from a system-tray icon with a compact popup: play/pause, sound picker,
 volume, and a sleep timer. All audio is generated on the device by
 `noise_gen.py` - nothing is downloaded and no network access is used.
@@ -15,7 +15,7 @@ QtMultimedia for gapless looping playback.
 
 ```
 pip install PySide6 PySide6-Addons
-python -m dither_app
+python -m zenhush
 ```
 
 Requires a desktop session with a system tray. Without a tray host the

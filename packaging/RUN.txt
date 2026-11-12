@@ -1,7 +1,7 @@
-dither - Linux test build (private, not for public distribution)
+Zenhush - Linux test build (private, not for public distribution)
 
 What this is
-  dither: a tiny noise machine for your top bar. Tray icon + popup with
+  Zenhush: a tiny noise machine for your top bar. Tray icon + popup with
   5 synthesized sounds (brown, white, pink, rain, ocean), volume, sleep
   timer, restart. One-directory build, nothing to install.
 
@@ -28,21 +28,21 @@ Runtime dependencies
   - Audio output: PulseAudio or PipeWire (pulse API).
 
 Run
-  chmod +x dither/dither
-  ./dither/dither
+  chmod +x zenhush/zenhush
+  ./zenhush/zenhush
   Click the tray icon (or use the fallback window) and pick a sound.
-  The dither/ directory must stay together: dither/dither loads its
-  bundled libraries from dither/_internal/.
+  The zenhush/ directory must stay together: zenhush/zenhush loads its
+  bundled libraries from zenhush/_internal/.
 
 Third-party components and licenses
   This build bundles Qt 6.11.3 (LGPL v3) and FFmpeg 7.1.5 (LGPL v2.1+)
-  as ordinary shared-library files under dither/_internal/ (replaceable),
+  as ordinary shared-library files under zenhush/_internal/ (replaceable),
   plus a Python 3.10 runtime (PSF) and the PyInstaller bootloader.
   See THIRD_PARTY_NOTICES.md and licenses/ for the full texts and the
   corresponding-source locations for the LGPL libraries (both verified
   live 12 Nov 2026). No written offer ships with this private test
   package; the notices point to the public sources instead.
-  dither's own source is included under source/.
+  Zenhush's own source is included under source/.
 
 Status
   Private test build. Test totals: 128 checks (31 synthesis, 68 app, 29

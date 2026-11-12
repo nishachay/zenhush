@@ -1,4 +1,4 @@
-"""dither - a tiny noise machine for your top bar.
+"""Zenhush - a tiny noise machine for your top bar.
 
 Cross-platform desktop app (Windows, macOS, Linux): a system-tray icon
 with a compact popup that plays locally synthesized noise. All audio is
@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel,
 from . import noise_gen, synth
 
 ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
-CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "dither")
+CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "zenhush")
 
 TIMER_CHOICES = [("Off", 0), ("15 min", 15), ("30 min", 30), ("45 min", 45), ("60 min", 60)]
 
@@ -654,7 +654,7 @@ class Popup(QWidget):
         self.current_theme = "dark"
         self.theme_mode = "Auto"
         self.reduce_motion = False
-        self.setWindowTitle("dither")
+        self.setWindowTitle("Zenhush")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -1065,7 +1065,7 @@ class TrayApp:
         fam = app_font_family()
         if fam:
             self.app.setFont(QFont(fam))
-        self.app.setApplicationName("dither")
+        self.app.setApplicationName("zenhush")
         self.app.setQuitOnLastWindowClosed(False)
 
         self.player = Player()
@@ -1077,9 +1077,9 @@ class TrayApp:
         self.tray = None
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray = QSystemTrayIcon(QIcon(os.path.join(ASSETS, "tray.png")), self.app)
-            self.tray.setToolTip("dither")
+            self.tray.setToolTip("Zenhush")
             menu = QMenu()
-            show_action = QAction("show dither", menu)
+            show_action = QAction("Show Zenhush", menu)
             show_action.triggered.connect(self.popup.show_near_cursor)
             quit_action = QAction("quit", menu)
             quit_action.triggered.connect(self.app.quit)
@@ -1093,7 +1093,7 @@ class TrayApp:
             self.popup.show()
 
     def _tray_activated(self, reason):
-        if os.environ.get("DITHER_DEBUG"):
+        if os.environ.get("ZENHUSH_DEBUG"):
             print(f"tray activated reason={reason} visible={self.popup.isVisible()}", file=sys.stderr)
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             if self.popup.isVisible():

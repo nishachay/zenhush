@@ -27,8 +27,8 @@ jobs:
         # Ubuntu note: Qt xcb is not used by these tests (offscreen platform),
         # so no X server is needed on any runner.
       - name: Build binary
-        run: pyinstaller packaging/dither.spec
+        run: pyinstaller packaging/zenhush.spec
       - uses: actions/upload-artifact@v4
         with:
-          name: dither-${{ matrix.os }}
+          name: zenhush-${{ matrix.os }}
           path: dist/

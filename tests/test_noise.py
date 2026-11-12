@@ -8,7 +8,7 @@ import os
 import sys
 import wave
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dither_app"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "zenhush"))
 import noise_gen
 
 import numpy as np

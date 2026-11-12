@@ -1,4 +1,4 @@
-"""Local noise and focus-sound synthesis for dither.
+"""Local noise and focus-sound synthesis for Zenhush.
 
 All audio is generated on the device with the Python standard library.
 Nothing is downloaded and no network access is used, so every sound is
