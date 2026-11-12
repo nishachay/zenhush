@@ -1,0 +1,34 @@
+# TEMPLATE: not yet run. Needs the repo to exist and Actions enabled.
+# Runs the test suites on all three OSes, then builds a per-OS binary with
+# PyInstaller and uploads it as a workflow artifact. A green run here is the
+# only acceptable proof for calling a Windows/macOS build "tested".
+name: build
+
+on:
+  workflow_dispatch:  # manual only: CI on a private repo can cost money; never auto-run
+
+jobs:
+  test-and-build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: pip install -r requirements-dev.txt
+      - name: Audio engine checks
+        run: python tests/test_noise.py
+      - name: UI checks (offscreen Qt)
+        run: python tests/test_app.py
+        # Ubuntu note: Qt xcb is not used by these tests (offscreen platform),
+        # so no X server is needed on any runner.
+      - name: Build binary
+        run: pyinstaller packaging/zenhush.spec
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zenhush-${{ matrix.os }}
+          path: dist/

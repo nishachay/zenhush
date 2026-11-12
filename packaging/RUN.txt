@@ -1,0 +1,58 @@
+Zenhush - Linux test build (private, not for public distribution)
+
+What this is
+  Zenhush - noise for focus and rest. A tiny noise machine for your
+  top bar. Tray icon + popup with
+  5 synthesized sounds (brown, white, pink, rain, ocean) generated live
+  (never a file, never ends, never repeats), a loop mode for your own
+  local audio file (wav/mp3/flac/ogg/m4a), volume, depth, rumble, sleep
+  timer, restart. One-directory build, nothing to install.
+
+Tested environment (what this build was actually verified on)
+  - Ubuntu 22.04.5 LTS, x86_64, glibc 2.35
+  - X11 session (Xvfb), PulseAudio (null sink), Ayatana
+    indicator-application StatusNotifier watcher
+  - Verified there: window renders, click plays, PCM audio captured from
+    the sound server across a loop seam, tray show/hide/quit through a
+    real D-Bus watcher, <1% of one CPU core, ~90 MB RAM.
+
+Estimated compatibility (NOT tested)
+  - Other x86_64 Linux desktops with glibc >= 2.35 (the build machine's
+    glibc) should work; older glibc will refuse to start the binary.
+  - Other distributions, Wayland sessions, and other tray hosts are
+    untested. If no tray host exists the app falls back to a small window.
+  - Windows and macOS builds do not exist yet.
+
+Runtime dependencies
+  - Required on X11: libxcb-cursor0
+      sudo apt install libxcb-cursor0
+    Without it the binary aborts at startup with Qt's error
+    "xcb-cursor0 or libxcb-cursor0 is needed" (verified both ways).
+  - Audio output: PulseAudio or PipeWire (pulse API).
+
+Run
+  chmod +x zenhush/zenhush
+  ./zenhush/zenhush
+  Click the tray icon (or use the fallback window) and pick a sound.
+  The zenhush/ directory must stay together: zenhush/zenhush loads its
+  bundled libraries from zenhush/_internal/.
+
+Third-party components and licenses
+  This build bundles Qt 6.11.3 (LGPL v3) and FFmpeg 7.1.5 (LGPL v2.1+)
+  as ordinary shared-library files under zenhush/_internal/ (replaceable),
+  plus a Python 3.10 runtime (PSF) and the PyInstaller bootloader.
+  See THIRD_PARTY_NOTICES.md and licenses/ for the full texts and the
+  corresponding-source locations for the LGPL libraries (both verified
+  live 12 Nov 2026). No written offer ships with this private test
+  package; the notices point to the public sources instead.
+  Zenhush's own source is included under source/.
+
+Status
+  Private test build. Test totals: 157 checks (31 synthesis, 69 app, 29
+  noise, 28 file-mode) pass against the same code as this binary; the
+  frozen binary's PCM output was verified against a source run, and the
+  file loop was captured across wraps with no silent window at the seam.
+  Note: lossy files can carry encoder padding (m4a measured ~20ms), so
+  some files may have a faint seam edge - that lives in the file, not
+  the loop. Not yet: Windows/macOS builds, icon pixels inside a real
+  desktop panel (icon design still under review).
