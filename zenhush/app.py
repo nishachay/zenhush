@@ -17,7 +17,8 @@ from PySide6.QtCore import (QEasingCurve, QPoint, QPointF, QRectF, QSize, Qt,
 from PySide6.QtGui import (QAction, QBrush, QColor, QCursor, QFont,
                            QFontDatabase, QGuiApplication, QIcon, QPainter,
                            QPainterPath, QPen, QPixmap)
-from PySide6.QtMultimedia import QAudio, QAudioFormat, QAudioSink
+from PySide6.QtMultimedia import (QAudio, QAudioFormat, QAudioSink,
+                                  QMediaDevices)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QLabel,
                                QMenu, QMessageBox, QPushButton, QSlider,
@@ -586,17 +587,37 @@ class Player:
     """
 
     def __init__(self):
-        fmt = QAudioFormat()
-        fmt.setSampleRate(synth.SAMPLE_RATE)
-        fmt.setChannelCount(synth.CHANNELS)
-        fmt.setSampleFormat(QAudioFormat.Int16)
+        self._fmt = QAudioFormat()
+        self._fmt.setSampleRate(synth.SAMPLE_RATE)
+        self._fmt.setChannelCount(synth.CHANNELS)
+        self._fmt.setSampleFormat(QAudioFormat.Int16)
         self.live = synth.LiveSource()
         self.file = None
         self.source = self.live
-        self.sink = QAudioSink(fmt)
+        self.sink = QAudioSink(self._fmt)
         self._started = False
         self.current = None
         self.current_kind = None  # "noise" or "file"
+        # Follow the system default output: plugging in earphones after the
+        # app started must move the sound, not leave it on the old device.
+        self._devices = QMediaDevices()
+        self._devices.audioOutputsChanged.connect(self._follow_default_output)
+
+    def _follow_default_output(self, *_):
+        """Rebuild the sink on the current default device, keeping state."""
+        suspended = self.sink.state() == QAudio.State.SuspendedState
+        was_started = self._started
+        self.sink.stop()
+        old = self.sink
+        self.sink = QAudioSink(QMediaDevices.defaultAudioOutput(), self._fmt)
+        old.deleteLater()
+        self._started = False
+        if was_started and self.current:
+            self.source.soft_start()
+            self.sink.start(self.source)
+            self._started = True
+            if suspended:
+                self.sink.suspend()
 
     def _drive(self, source):
         """Point the sink at source (starting it if needed) and resume."""
