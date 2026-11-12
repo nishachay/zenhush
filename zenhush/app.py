@@ -595,6 +595,7 @@ class Player:
         self.file = None
         self.source = self.live
         self.sink = QAudioSink(self._fmt)
+        self._bound_device = QMediaDevices.defaultAudioOutput()
         self._started = False
         self.current = None
         self.current_kind = None  # "noise" or "file"
@@ -603,6 +604,11 @@ class Player:
         self._devices = QMediaDevices()
         self._devices.audioOutputsChanged.connect(self._follow_default_output)
 
+    def _resync_output(self):
+        """Qt has no default-device-changed signal, so user actions re-check."""
+        if self._bound_device != QMediaDevices.defaultAudioOutput():
+            self._follow_default_output()
+
     def _follow_default_output(self, *_):
         """Rebuild the sink on the current default device, keeping state."""
         suspended = self.sink.state() == QAudio.State.SuspendedState
@@ -610,6 +616,7 @@ class Player:
         self.sink.stop()
         old = self.sink
         self.sink = QAudioSink(QMediaDevices.defaultAudioOutput(), self._fmt)
+        self._bound_device = QMediaDevices.defaultAudioOutput()
         old.deleteLater()
         self._started = False
         if was_started and self.current:
@@ -621,6 +628,7 @@ class Player:
 
     def _drive(self, source):
         """Point the sink at source (starting it if needed) and resume."""
+        self._resync_output()
         if self.source is not source:
             if self._started:
                 self.sink.stop()
@@ -649,12 +657,14 @@ class Player:
 
     def resume(self):
         if self.current:
+            self._resync_output()
             self.source.soft_start()
             self.sink.resume()
 
     def restart(self):
         """Noise: fresh stream from a new seed, never a replay.
         File: rewind the user's file to the start."""
+        self._resync_output()
         self.source.restart()
         self.sink.resume()
 
