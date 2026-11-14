@@ -1,0 +1,48 @@
+[package]
+name = "zenhush"
+version = "1.0.0"
+edition = "2021"
+description = "Zenhush — a light system-tray noise machine (live brown/white/pink/rain/ocean + file loop)"
+license = "MIT"
+
+[[bin]]
+name = "zenhush"
+path = "src/main.rs"
+
+[dependencies]
+# Audio output (cross-platform: ALSA/PipeWire/PulseAudio, WASAPI, CoreAudio)
+cpal = "0.18"
+# Immediate-mode UI for the popup
+eframe = "0.32"
+egui = "0.32"
+# System tray icon + menu (pure Rust D-Bus StatusNotifier, no GTK).
+# tray-icon was dropped: it needs GTK3 + libappindicator, and the VM
+# cannot install their dev headers (broken libzstd-dev pin). ksni has
+# no system library dependency, so the binary stays self-contained.
+ksni = { version = "0.3", features = ["blocking"] }
+# File decoding: wav, mp3, flac, ogg, m4a
+symphonia = { version = "0.5", features = ["mp3", "flac", "ogg", "wav", "isomp4", "aac"] }
+# Random numbers for the noise generators
+rand = "0.9"
+# Lock-free ring buffer (audio callback -> UI visualizer)
+rtrb = "0.3"
+# Settings persistence (JSON in the user config dir)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+# Native file picker (for "Your File")
+rfd = "0.15"
+# Decode the tray/window icon PNGs (png only, keeps the binary small)
+image = { version = "0.25", default-features = false, features = ["png"] }
+# SVG icons (the same Lucide files the Python app uses), rasterized
+# with resvg. default-features off: the icons are pure paths, no text,
+# no raster images, no system fonts needed.
+resvg = { version = "0.50", default-features = false }
+
+[profile.release]
+# Small binary, fast startup: optimize for size, strip symbols
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
