@@ -370,6 +370,7 @@ mod linux {
 #[cfg(not(target_os = "linux"))]
 mod fallback {
     use std::sync::mpsc::Sender;
+    use std::sync::Arc;
 
     #[derive(Clone, Debug, PartialEq)]
     pub enum MprisCmd {

@@ -31,8 +31,8 @@ use eframe::egui;
 #[cfg(target_os = "macos")]
 fn set_mac_accessory_policy() {
     use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-    unsafe {
-        let mtm = objc2::foundation::MainThreadMarker::new().unwrap();
+    use objc2_foundation::MainThreadMarker;
+    if let Some(mtm) = MainThreadMarker::new() {
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     }
@@ -73,9 +73,6 @@ fn spawn_background_daemon() -> bool {
 }
 
 fn run_ui_window() {
-    #[cfg(target_os = "macos")]
-    set_mac_accessory_policy();
-
     let client = match bridge::BridgeClient::connect() {
         Ok(c) => c,
         Err(e) => {
@@ -151,6 +148,8 @@ fn run_ui_window() {
                 vec!["SchibstedGroteskSemiBold".to_owned()],
             );
             cc.egui_ctx.set_fonts(fonts);
+            #[cfg(target_os = "macos")]
+            set_mac_accessory_policy();
             client.bind_egui_ctx(&cc.egui_ctx);
 
             Ok(Box::new(app::ZenhushUiApp::new(client, loaded)))

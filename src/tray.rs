@@ -5,7 +5,9 @@
 //!   amber-accented active icon whenever audio is playing.
 //! - macOS / Windows: native `tray-icon` menu-bar / notification-area icon.
 
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Receiver};
+#[cfg(target_os = "linux")]
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use crate::synth::Sound;
@@ -512,7 +514,7 @@ mod platform {
                 while let Ok(ev) = receiver.recv() {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
-                        state: MouseButtonState::Up,
+                        button_state: MouseButtonState::Up,
                         ..
                     } = ev
                     {
