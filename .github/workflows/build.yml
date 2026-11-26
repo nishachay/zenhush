@@ -1,33 +1,40 @@
-# TEMPLATE: not yet run. Needs the repo to exist and Actions enabled.
-# Runs the test suites on all three OSes, then builds a per-OS binary with
-# PyInstaller and uploads it as a workflow artifact. A green run here is the
-# only acceptable proof for calling a Windows/macOS build "tested".
 name: build
 
 on:
-  workflow_dispatch:  # manual only: CI on a private repo can cost money; never auto-run
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
   test-and-build:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install
-        run: pip install -r requirements-dev.txt
-      - name: Audio engine checks
-        run: python tests/test_noise.py
-      - name: UI checks (offscreen Qt)
-        run: python tests/test_app.py
-        # Ubuntu note: Qt xcb is not used by these tests (offscreen platform),
-        # so no X server is needed on any runner.
-      - name: Build binary
-        run: pyinstaller packaging/zenhush.spec
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux audio headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxkbcommon-x11-0
+      - name: Run tests
+        run: cargo test --locked
+      - name: Build release binary
+        run: cargo build --release --locked
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/release/zenhush.exe dist/zenhush-windows-x86_64.exe
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            cp target/release/zenhush dist/zenhush-macos
+          else
+            cp target/release/zenhush dist/zenhush-linux-x86_64
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: zenhush-${{ matrix.os }}

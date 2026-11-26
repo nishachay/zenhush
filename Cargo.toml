@@ -1,8 +1,8 @@
 [package]
 name = "zenhush"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
-description = "Zenhush — a light system-tray noise machine (live brown/white/pink/rain/ocean + file loop)"
+description = "Zenhush — lightweight top-bar & notch focus audio machine (live stereo soundscapes, atmosphere layering, locked local tracks)"
 license = "MIT"
 
 [[bin]]
@@ -12,35 +12,41 @@ path = "src/main.rs"
 [dependencies]
 # Audio output (cross-platform: ALSA/PipeWire/PulseAudio, WASAPI, CoreAudio)
 cpal = "0.18"
-# Immediate-mode UI for the popup
-eframe = "0.32"
+# Immediate-mode UI (glow backend only — avoids heavy wgpu/Vulkan RAM overhead)
+eframe = { version = "0.32", default-features = false, features = ["glow", "wayland", "x11", "default_fonts"] }
 egui = "0.32"
-# System tray icon + menu (pure Rust D-Bus StatusNotifier, no GTK).
-# tray-icon was dropped: it needs GTK3 + libappindicator, and the VM
-# cannot install their dev headers (broken libzstd-dev pin). ksni has
-# no system library dependency, so the binary stays self-contained.
-ksni = { version = "0.3", features = ["blocking"] }
 # File decoding: wav, mp3, flac, ogg, m4a
 symphonia = { version = "0.5", features = ["mp3", "flac", "ogg", "wav", "isomp4", "aac"] }
-# Random numbers for the noise generators
+# Random numbers for procedural noise & textures
 rand = "0.9"
-# Lock-free ring buffer (audio callback -> UI visualizer)
+# Lock-free ring buffers (decoder -> audio callback -> UI visualizer)
 rtrb = "0.3"
-# Settings persistence (JSON in the user config dir)
+# Settings & local track library persistence
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
-# Native file picker (for "Your File")
+# Native file picker
 rfd = "0.15"
-# Decode the tray/window icon PNGs (png only, keeps the binary small)
+# PNG decoding/encoding for icons and dynamic tray icon badges
 image = { version = "0.25", default-features = false, features = ["png"] }
-# SVG icons (the same Lucide files the Python app uses), rasterized
-# with resvg. default-features off: the icons are pure paths, no text,
-# no raster images, no system fonts needed.
+# Lucide SVG icon rasterizer
 resvg = { version = "0.50", default-features = false }
+# Cross-platform global hotkeys (X11, macOS, Windows; Wayland uses IPC + portal/gsettings)
+global-hotkey = "0.10"
+
+# Linux system tray (pure Rust D-Bus StatusNotifier, zero GTK dependency)
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3", features = ["blocking"] }
+
+# macOS & Windows native system tray / menu bar
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tray-icon = { version = "0.27", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-app-kit = { version = "0.2", default-features = false, features = ["NSApplication", "NSRunningApplication"] }
 
 [profile.release]
-# Small binary, fast startup: optimize for size, strip symbols
 opt-level = "z"
 lto = true
 codegen-units = 1

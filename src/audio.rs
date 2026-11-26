@@ -1,79 +1,97 @@
-//! Audio output engine: cpal stream + the live synth.
+//! Adaptive stereo audio output engine built on cpal.
 //!
-//! The synth lives in the audio callback (real-time thread) so samples
-//! are generated on demand with no extra copies. The UI thread controls
-//! it by sending commands over a channel; the callback drains the
-//! channel at the start of each buffer and applies them. The callback
-//! never blocks: it only reads the channel (try_recv) and writes samples.
-//!
-//! Pause uses the stream's own pause/play so the audio device can sleep
-//! when the user pauses. Resume fades in gently (soft start).
+//! Runs synthesis and file-streaming in a real-time non-blocking callback
+//! at the output device's native sample rate and stereo channel layout.
+//! Supports smooth click-free pause fade-out followed by `stream.pause()`
+//! so paused background usage consumes ~0% CPU.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Stream, StreamConfig};
 
-use crate::synth::{Sound, Synth, SAMPLE_RATE};
+use crate::filemode::{FileStreamHandle, FileStreamReader};
+use crate::synth::{
+    FileTone, Sound, Synth, DEFAULT_DEPTH, DEFAULT_LAYER_MIX, DEFAULT_RUMBLE,
+    DEFAULT_SAMPLE_RATE, DEFAULT_VOLUME,
+};
 
-/// Commands the UI thread sends to the audio callback.
 enum AudioCmd {
     SetSound(Sound),
-    SetFile(Arc<Vec<f32>>),
+    SetFile(FileStreamReader),
+    SetLayer(Option<Sound>),
+    SetLayerMix(u8),
+    SetFileTone(FileTone),
     SetVolume(u8),
     SetDepth(u8),
     SetRumble(u8),
-    SetPlaying(bool),
+    SetMasterFade(f32),
     SoftStart,
+    BeginPauseFade,
     Restart,
 }
 
-/// The audio engine. Owns the cpal stream and the authoritative settings
-/// (so a device-change rebuild can recreate the synth identically).
 pub struct AudioEngine {
     stream: Option<Stream>,
+    stream_paused: bool,
     device_name: String,
+    sample_rate: u32,
+    last_device_poll: Instant,
     cmd_tx: Sender<AudioCmd>,
-    /// RMS values from the callback, for the visualizer (lock-free).
     rms_rx: rtrb::Consumer<f32>,
-    // Authoritative settings, kept here for rebuilds.
+    pause_fade_done: Arc<AtomicBool>,
+
+    // Authoritative settings (used to rebuild stream identically on device hotplug)
     sound: Sound,
     is_file: bool,
-    file_samples: Option<Arc<Vec<f32>>>,
+    file_handle: Option<FileStreamHandle>,
     file_name: Option<String>,
+    layer_sound: Option<Sound>,
+    layer_mix: u8,
+    file_tone: FileTone,
     volume: u8,
+    muted: bool,
     depth: u8,
     rumble: u8,
     playing: bool,
-    /// Last audio error, if the device failed (shown in the UI).
+
     error: Arc<Mutex<Option<String>>>,
 }
 
 impl AudioEngine {
-    /// Build the engine on the default output device (44.1 kHz mono f32).
-    /// Never fails: if there is no audio device, the error is recorded
-    /// and the UI shows it instead of "Live" over silence. Resume will
-    /// retry building the stream.
     pub fn new() -> Self {
         let (rms_tx, rms_rx) = rtrb::RingBuffer::new(256);
         let (cmd_tx, cmd_rx) = channel::<AudioCmd>();
         let error = Arc::new(Mutex::new(None));
+        let pause_fade_done = Arc::new(AtomicBool::new(false));
+
         let mut engine = AudioEngine {
             stream: None,
+            stream_paused: false,
             device_name: String::new(),
+            sample_rate: DEFAULT_SAMPLE_RATE,
+            last_device_poll: Instant::now(),
             cmd_tx,
             rms_rx,
+            pause_fade_done,
             sound: Sound::Brown,
             is_file: false,
-            file_samples: None,
+            file_handle: None,
             file_name: None,
-            volume: crate::synth::DEFAULT_VOLUME,
-            depth: crate::synth::DEFAULT_DEPTH,
-            rumble: crate::synth::DEFAULT_RUMBLE,
+            layer_sound: None,
+            layer_mix: DEFAULT_LAYER_MIX,
+            file_tone: FileTone::Original,
+            volume: DEFAULT_VOLUME,
+            muted: false,
+            depth: DEFAULT_DEPTH,
+            rumble: DEFAULT_RUMBLE,
             playing: false,
             error: error.clone(),
         };
+
         if let Err(e) = engine.build_stream(rms_tx, cmd_rx, error) {
             if let Ok(mut slot) = engine.error.lock() {
                 *slot = Some(e);
@@ -88,6 +106,14 @@ impl AudioEngine {
             .ok_or_else(|| "No audio device".to_string())
     }
 
+    fn effective_volume(&self) -> u8 {
+        if self.muted {
+            0
+        } else {
+            self.volume
+        }
+    }
+
     fn build_stream(
         &mut self,
         mut rms_tx: rtrb::Producer<f32>,
@@ -98,98 +124,143 @@ impl AudioEngine {
         self.device_name = device
             .description()
             .map(|d| d.name().to_string())
-            .unwrap_or_else(|_| "Unknown device".to_string());
+            .unwrap_or_else(|_| "Default output".to_string());
+
+        let (native_rate, native_channels) = match device.default_output_config() {
+            Ok(cfg) => (cfg.sample_rate().clamp(22_050, 192_000), cfg.channels()),
+            Err(_) => (DEFAULT_SAMPLE_RATE, 2),
+        };
+        let out_channels: u16 = if native_channels >= 2 { 2 } else { 1 };
+        self.sample_rate = native_rate;
 
         let config = StreamConfig {
-            channels: 1,
-            sample_rate: SAMPLE_RATE,
+            channels: out_channels,
+            sample_rate: native_rate,
             buffer_size: cpal::BufferSize::Default,
         };
 
-        let mut synth = Synth::new(self.sound);
-        synth.set_volume(self.volume);
+        let mut synth = Synth::new(self.sound, native_rate);
+        synth.set_volume(self.effective_volume());
         synth.set_depth(self.depth);
         synth.set_rumble(self.rumble);
-        if let Some(samples) = &self.file_samples {
-            synth.set_file((**samples).clone());
+        synth.set_layer(self.layer_sound);
+        synth.set_layer_mix(self.layer_mix);
+        synth.set_file_tone(self.file_tone);
+
+        if self.is_file {
+            if let Some(handle) = &self.file_handle {
+                if let Ok(reader) = handle.open_reader(native_rate) {
+                    synth.set_file_stream(reader);
+                }
+            }
         }
         if self.playing {
             synth.soft_start();
         }
 
-        let mut playing = self.playing;
-        let mut buf: Vec<i16> = Vec::new();
+        let pause_done_flag = Arc::new(AtomicBool::new(!self.playing));
+        self.pause_fade_done = pause_done_flag.clone();
+
+        let mut active = self.playing;
+        let mut stereo_buf: Vec<f32> = Vec::new();
         let err_clone = error.clone();
+        let ch_count = out_channels as usize;
 
-        let stream = device.build_output_stream(
-            config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                // Apply any pending commands first.
-                while let Ok(cmd) = cmd_rx.try_recv() {
-                    match cmd {
-                        AudioCmd::SetSound(s) => synth.set_sound(s),
-                        AudioCmd::SetFile(samples) => synth.set_file((*samples).clone()),
-                        AudioCmd::SetVolume(v) => synth.set_volume(v),
-                        AudioCmd::SetDepth(d) => synth.set_depth(d),
-                        AudioCmd::SetRumble(r) => synth.set_rumble(r),
-                        AudioCmd::SetPlaying(p) => playing = p,
-                        AudioCmd::SoftStart => synth.soft_start(),
-                        AudioCmd::Restart => synth.restart(),
+        let stream = device
+            .build_output_stream(
+                config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    while let Ok(cmd) = cmd_rx.try_recv() {
+                        match cmd {
+                            AudioCmd::SetSound(s) => {
+                                synth.set_sound(s);
+                                active = true;
+                                pause_done_flag.store(false, Ordering::Release);
+                            }
+                            AudioCmd::SetFile(reader) => {
+                                synth.set_file_stream(reader);
+                                active = true;
+                                pause_done_flag.store(false, Ordering::Release);
+                            }
+                            AudioCmd::SetLayer(l) => synth.set_layer(l),
+                            AudioCmd::SetLayerMix(m) => synth.set_layer_mix(m),
+                            AudioCmd::SetFileTone(t) => synth.set_file_tone(t),
+                            AudioCmd::SetVolume(v) => synth.set_volume(v),
+                            AudioCmd::SetDepth(d) => synth.set_depth(d),
+                            AudioCmd::SetRumble(r) => synth.set_rumble(r),
+                            AudioCmd::SetMasterFade(f) => synth.set_master_fade(f),
+                            AudioCmd::SoftStart => {
+                                synth.soft_start();
+                                active = true;
+                                pause_done_flag.store(false, Ordering::Release);
+                            }
+                            AudioCmd::BeginPauseFade => {
+                                synth.begin_pause_fade();
+                            }
+                            AudioCmd::Restart => {
+                                synth.restart();
+                                active = true;
+                                pause_done_flag.store(false, Ordering::Release);
+                            }
+                        }
                     }
-                }
-                if !playing {
-                    for s in data.iter_mut() {
-                        *s = 0.0;
-                    }
-                    return;
-                }
-                if buf.len() != data.len() {
-                    buf.resize(data.len(), 0);
-                }
-                synth.render(&mut buf);
-                for (i, s) in data.iter_mut().enumerate() {
-                    *s = buf[i] as f32 / 32768.0;
-                }
-                // Drain new RMS values to the UI (lock-free ring).
-                for v in synth.drain_rms() {
-                    let _ = rms_tx.push(v);
-                }
-            },
-            move |err| {
-                // The device failed: record it so the UI can say so
-                // instead of showing "Live" over silence.
-                if let Ok(mut slot) = err_clone.lock() {
-                    *slot = Some(format!("No audio device ({})", err));
-                }
-            },
-            None,
-        );
 
-        let stream = match stream {
-            Ok(s) => s,
-            Err(e) => return Err(format!("No audio device ({})", e)),
-        };
-        if let Err(e) = stream.play() {
-            return Err(format!("No audio device ({})", e));
+                    if !active {
+                        data.fill(0.0);
+                        return;
+                    }
+
+                    let frames = data.len() / ch_count.max(1);
+                    if stereo_buf.len() != frames * 2 {
+                        stereo_buf.resize(frames * 2, 0.0);
+                    }
+                    synth.render_stereo(&mut stereo_buf);
+
+                    if ch_count == 2 {
+                        data.copy_from_slice(&stereo_buf);
+                    } else {
+                        for (i, out_s) in data.iter_mut().enumerate() {
+                            let l = stereo_buf[i * 2];
+                            let r = stereo_buf[i * 2 + 1];
+                            *out_s = 0.5 * (l + r);
+                        }
+                    }
+
+                    if synth.is_pause_fade_done() {
+                        active = false;
+                        pause_done_flag.store(true, Ordering::Release);
+                    }
+
+                    for v in synth.drain_rms() {
+                        let _ = rms_tx.push(v);
+                    }
+                },
+                move |err| {
+                    if let Ok(mut slot) = err_clone.lock() {
+                        *slot = Some(format!("Audio error ({})", err));
+                    }
+                },
+                None,
+            )
+            .map_err(|e| format!("No audio device ({})", e))?;
+
+        if self.playing {
+            stream
+                .play()
+                .map_err(|e| format!("No audio device ({})", e))?;
+            self.stream_paused = false;
+        } else {
+            self.stream_paused = true;
         }
+
         self.stream = Some(stream);
+        if let Ok(mut slot) = self.error.lock() {
+            *slot = None;
+        }
         Ok(())
     }
 
-    /// Rebuild the stream if the default output device changed.
-    /// Call this periodically from the UI. Returns true if it rebuilt.
-    pub fn rebuild_if_device_changed(&mut self) -> bool {
-        let current = match Self::default_device() {
-            Ok(d) => d
-                .description()
-                .map(|x| x.name().to_string())
-                .unwrap_or_default(),
-            Err(_) => return false,
-        };
-        if current == self.device_name && self.stream.is_some() {
-            return false;
-        }
-        // Rebuild: fresh channel + ring so the old callback drops cleanly.
+    fn rebuild_stream(&mut self) -> bool {
         let (rms_tx, rms_rx) = rtrb::RingBuffer::new(256);
         let (cmd_tx, cmd_rx) = channel::<AudioCmd>();
         self.rms_rx = rms_rx;
@@ -206,17 +277,68 @@ impl AudioEngine {
         }
     }
 
-    /// The current default device name (for display / debugging).
-    pub fn device_name(&self) -> &str {
-        &self.device_name
+    /// Periodic maintenance: follow default output device hotplugs & suspend
+    /// the audio stream once a pause fade-out finishes (0% idle CPU).
+    pub fn maintain(&mut self) {
+        if !self.playing
+            && !self.stream_paused
+            && self.pause_fade_done.load(Ordering::Acquire)
+        {
+            if let Some(stream) = &self.stream {
+                let _ = stream.pause();
+                self.stream_paused = true;
+            }
+        }
+
+        // Only poll default device hotplugs while actively playing (0% idle CPU when paused)
+        if !self.playing || self.last_device_poll.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.last_device_poll = Instant::now();
+
+        let current = match Self::default_device() {
+            Ok(d) => d
+                .description()
+                .map(|x| x.name().to_string())
+                .unwrap_or_default(),
+            Err(_) => return,
+        };
+        if current != self.device_name || self.stream.is_none() {
+            self.rebuild_stream();
+        }
     }
 
-    /// Last audio error, if the device failed.
+    fn ensure_playing_stream(&mut self) {
+        let current_dev = Self::default_device()
+            .ok()
+            .and_then(|d| d.description().ok().map(|x| x.name().to_string()));
+        let dev_changed = current_dev
+            .as_deref()
+            .map(|n| n != self.device_name)
+            .unwrap_or(false);
+        if dev_changed || self.stream.is_none() || self.audio_error().is_some() {
+            self.rebuild_stream();
+        }
+        if self.stream_paused {
+            if let Some(stream) = &self.stream {
+                let _ = stream.play();
+                self.stream_paused = false;
+            }
+        }
+    }
+
+    pub fn device_name(&self) -> &str {
+        if self.device_name.is_empty() {
+            "System Default"
+        } else {
+            &self.device_name
+        }
+    }
+
     pub fn audio_error(&self) -> Option<String> {
         self.error.lock().ok().and_then(|g| g.clone())
     }
 
-    /// Drain new RMS values (oldest first) for the visualizer.
     pub fn drain_rms(&mut self) -> Vec<f32> {
         let mut out = Vec::new();
         while let Ok(v) = self.rms_rx.pop() {
@@ -225,28 +347,26 @@ impl AudioEngine {
         out
     }
 
-    pub fn is_playing(&self) -> bool {
-        self.playing
+    pub fn has_loaded_source(&self) -> bool {
+        !self.is_file || self.file_handle.is_some()
     }
 
     pub fn is_file(&self) -> bool {
         self.is_file
     }
 
-    pub fn sound(&self) -> Sound {
-        self.sound
-    }
-
-    pub fn file_name(&self) -> Option<&str> {
-        self.file_name.as_deref()
-    }
-
     pub fn volume(&self) -> u8 {
         self.volume
     }
+
+    pub fn is_muted(&self) -> bool {
+        self.muted
+    }
+
     pub fn depth(&self) -> u8 {
         self.depth
     }
+
     pub fn rumble(&self) -> u8 {
         self.rumble
     }
@@ -258,72 +378,91 @@ impl AudioEngine {
     pub fn play_sound(&mut self, sound: Sound) {
         self.sound = sound;
         self.is_file = false;
-        self.file_samples = None;
-        self.file_name = None;
+        self.playing = true;
+        self.ensure_playing_stream();
         self.send(AudioCmd::SetSound(sound));
-        if !self.playing {
-            self.playing = true;
-            self.send(AudioCmd::SetPlaying(true));
-            self.send(AudioCmd::SoftStart);
-        }
+        self.send(AudioCmd::SetMasterFade(1.0));
     }
 
-    pub fn play_file(&mut self, samples: Arc<Vec<f32>>, name: String) {
+    pub fn play_file(&mut self, handle: FileStreamHandle, name: String) -> Result<(), String> {
+        let reader = handle.open_reader(self.sample_rate)?;
         self.is_file = true;
-        self.file_samples = Some(samples.clone());
+        self.file_handle = Some(handle);
         self.file_name = Some(name);
-        self.send(AudioCmd::SetFile(samples));
-        if !self.playing {
-            self.playing = true;
-            self.send(AudioCmd::SetPlaying(true));
-            self.send(AudioCmd::SoftStart);
-        }
+        self.playing = true;
+        self.ensure_playing_stream();
+        self.send(AudioCmd::SetFile(reader));
+        self.send(AudioCmd::SetMasterFade(1.0));
+        Ok(())
     }
 
     pub fn pause(&mut self) {
         if self.playing {
             self.playing = false;
-            self.send(AudioCmd::SetPlaying(false));
+            self.pause_fade_done.store(false, Ordering::Release);
+            self.send(AudioCmd::BeginPauseFade);
         }
     }
 
     pub fn resume(&mut self) {
         if !self.playing {
-            // If the device died while paused, rebuild the stream so
-            // resume actually restarts it instead of doing nothing.
-            if self.stream.is_none() || self.audio_error().is_some() {
-                let (rms_tx, rms_rx) = rtrb::RingBuffer::new(256);
-                let (cmd_tx, cmd_rx) = channel::<AudioCmd>();
-                self.rms_rx = rms_rx;
-                self.cmd_tx = cmd_tx;
-                if let Ok(mut slot) = self.error.lock() {
-                    *slot = None;
-                }
-                let err = self.error.clone();
-                let _ = self.build_stream(rms_tx, cmd_rx, err);
-            }
             self.playing = true;
-            self.send(AudioCmd::SetPlaying(true));
+            self.ensure_playing_stream();
             self.send(AudioCmd::SoftStart);
         }
     }
 
     pub fn restart(&mut self) {
+        self.playing = true;
+        self.ensure_playing_stream();
         self.send(AudioCmd::Restart);
     }
 
     pub fn set_volume(&mut self, v: u8) {
-        self.volume = v;
-        self.send(AudioCmd::SetVolume(v));
+        self.volume = v.min(100);
+        if self.muted && self.volume > 0 {
+            self.muted = false;
+        }
+        self.send(AudioCmd::SetVolume(self.effective_volume()));
+    }
+
+    pub fn set_muted(&mut self, muted: bool) {
+        self.muted = muted;
+        self.send(AudioCmd::SetVolume(self.effective_volume()));
     }
 
     pub fn set_depth(&mut self, v: u8) {
-        self.depth = v;
-        self.send(AudioCmd::SetDepth(v));
+        self.depth = v.min(100);
+        self.send(AudioCmd::SetDepth(self.depth));
     }
 
     pub fn set_rumble(&mut self, v: u8) {
-        self.rumble = v;
-        self.send(AudioCmd::SetRumble(v));
+        self.rumble = v.min(100);
+        self.send(AudioCmd::SetRumble(self.rumble));
+    }
+
+    pub fn set_layer(&mut self, layer: Option<Sound>) {
+        self.layer_sound = layer;
+        self.send(AudioCmd::SetLayer(layer));
+    }
+
+    pub fn set_layer_mix(&mut self, mix: u8) {
+        self.layer_mix = mix.min(100);
+        self.send(AudioCmd::SetLayerMix(self.layer_mix));
+    }
+
+    pub fn set_file_tone(&mut self, tone: FileTone) {
+        self.file_tone = tone;
+        self.send(AudioCmd::SetFileTone(tone));
+    }
+
+    pub fn set_crossfade(&mut self, enabled: bool) {
+        if let Some(h) = &self.file_handle {
+            h.set_crossfade(enabled);
+        }
+    }
+
+    pub fn set_master_fade(&self, factor: f32) {
+        self.send(AudioCmd::SetMasterFade(factor));
     }
 }

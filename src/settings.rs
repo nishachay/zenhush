@@ -1,18 +1,21 @@
-//! Settings persistence: volume, depth, rumble, theme, reduce motion,
-//! and sleep timer, remembered across restarts in a JSON file under
-//! the user config dir (~/.config/zenhush/settings.json on Linux).
-//! Missing or corrupt settings fall back to the documented defaults,
-//! so a fresh install behaves exactly like the Python app's defaults.
+//! Persistent settings & local audio library for Zenhush.
+//!
+//! Stored as JSON under the user's config directory (`~/.config/zenhush/settings.json`
+//! on Linux, `~/Library/Application Support/zenhush/settings.json` on macOS).
+//! Includes backward-compatible defaults so upgrading from v1 preserves user settings.
 
 use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::synth::{DEFAULT_DEPTH, DEFAULT_RUMBLE, DEFAULT_VOLUME};
+use crate::synth::{
+    FileTone, Sound, DEFAULT_DEPTH, DEFAULT_LAYER_MIX, DEFAULT_RUMBLE, DEFAULT_VOLUME,
+};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub enum ThemeMode {
+    #[default]
     Auto,
     Light,
     Dark,
@@ -30,26 +33,111 @@ impl ThemeMode {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub enum WindowMode {
+    #[default]
+    Card,
+    NotchPill,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub enum DockAnchor {
+    #[default]
+    TopCenter,
+    TopRight,
+    Free,
+}
+
+impl DockAnchor {
+    pub const ALL: [DockAnchor; 3] = [
+        DockAnchor::TopCenter,
+        DockAnchor::TopRight,
+        DockAnchor::Free,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DockAnchor::TopCenter => "Top Notch",
+            DockAnchor::TopRight => "Top Bar",
+            DockAnchor::Free => "Draggable",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalTrack {
+    pub path: PathBuf,
+    pub title: String,
+    #[serde(default)]
+    pub duration_secs: Option<u64>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub volume: u8,
+    pub muted: bool,
     pub depth: u8,
     pub rumble: u8,
+
+    /// Last active selection (ignored at launch when `locked_default_file` is set).
+    pub active_is_file: bool,
+    pub active_sound: Sound,
+    pub active_file: Option<PathBuf>,
+
+    /// User-locked default local audio file (takes precedence at startup!).
+    pub locked_default_file: Option<PathBuf>,
+    pub local_tracks: Vec<LocalTrack>,
+
+    pub file_tone: FileTone,
+    pub loop_crossfade: bool,
+
+    pub layer_sound: Option<Sound>,
+    pub layer_mix: u8,
+
     pub theme: ThemeMode,
     pub reduce_motion: bool,
-    /// Sleep timer in minutes (0 = off).
+    /// Sleep/focus timer in minutes (0 = off).
     pub timer_minutes: u32,
+
+    pub window_mode: WindowMode,
+    pub dock_anchor: DockAnchor,
+    pub saved_pos: Option<[f32; 2]>,
+    pub pinned: bool,
+    pub auto_play_on_launch: bool,
+    pub start_in_background: bool,
+
+    pub global_shortcut_toggle: String,
+    pub global_shortcut_play: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Settings {
             volume: DEFAULT_VOLUME,
+            muted: false,
             depth: DEFAULT_DEPTH,
             rumble: DEFAULT_RUMBLE,
+            active_is_file: false,
+            active_sound: Sound::Brown,
+            active_file: None,
+            locked_default_file: None,
+            local_tracks: Vec::new(),
+            file_tone: FileTone::Original,
+            loop_crossfade: true,
+            layer_sound: None,
+            layer_mix: DEFAULT_LAYER_MIX,
             theme: ThemeMode::Auto,
             reduce_motion: false,
             timer_minutes: 0,
+            window_mode: WindowMode::Card,
+            dock_anchor: DockAnchor::TopCenter,
+            saved_pos: None,
+            pinned: false,
+            auto_play_on_launch: false,
+            start_in_background: false,
+            global_shortcut_toggle: "Alt+Shift+Z".to_string(),
+            global_shortcut_play: "Alt+Shift+Space".to_string(),
         }
     }
 }
@@ -58,7 +146,6 @@ fn settings_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("zenhush").join("settings.json"))
 }
 
-/// Load settings, falling back to defaults when missing or unreadable.
 pub fn load() -> Settings {
     let Some(path) = settings_path() else {
         return Settings::default();
@@ -69,7 +156,6 @@ pub fn load() -> Settings {
     serde_json::from_str(&text).unwrap_or_default()
 }
 
-/// Save settings. Errors are ignored (a missing config dir is not fatal).
 pub fn save(settings: &Settings) {
     let Some(path) = settings_path() else {
         return;
@@ -79,5 +165,30 @@ pub fn save(settings: &Settings) {
     }
     if let Ok(text) = serde_json::to_string_pretty(settings) {
         let _ = fs::write(&path, text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v1_settings_deserialize_with_clean_defaults() {
+        let v1 = r#"{
+            "volume": 55,
+            "depth": 80,
+            "rumble": 40,
+            "theme": "Dark",
+            "reduce_motion": true,
+            "timer_minutes": 25
+        }"#;
+        let s: Settings = serde_json::from_str(v1).unwrap();
+        assert_eq!(s.volume, 55);
+        assert_eq!(s.depth, 80);
+        assert_eq!(s.theme, ThemeMode::Dark);
+        assert!(s.reduce_motion);
+        assert_eq!(s.timer_minutes, 25);
+        assert!(s.locked_default_file.is_none());
+        assert_eq!(s.file_tone, FileTone::Original);
     }
 }
