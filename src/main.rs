@@ -1,19 +1,30 @@
 //! Zenhush — lightweight top-bar & notch focus audio machine.
 //!
-//! Live stereo procedural focus soundscapes, atmosphere layering,
-//! streaming local audio tracks with Lock-as-Default persistence,
-//! global/in-app shortcuts, and single-instance background IPC.
+//! Architecture:
+//! - Background Core (`--daemon` / `--background`): owns stereo audio synthesis,
+//!   streaming local audio decoding, system tray, MPRIS2 D-Bus media controls,
+//!   global shortcuts, and IPC (~15 MB RSS, 0% idle CPU, zero OpenGL/GPU RAM).
+//! - On-demand Popup UI (`--ui`): opens when toggled, renders the sleek Card or
+//!   Notch Pill via `eframe`, and exits cleanly when hidden so GPU/GL memory is
+//!   reclaimed immediately.
 
 mod app;
 mod audio;
+mod bridge;
+mod daemon;
 mod filemode;
+mod gnome_ext;
 mod icons;
 mod ipc;
+mod mpris;
 mod settings;
 mod shortcuts;
 mod synth;
 mod theme;
 mod tray;
+
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 
@@ -39,58 +50,42 @@ fn load_app_icon() -> Option<egui::IconData> {
     })
 }
 
-fn main() {
-    let cli = ipc::parse_cli();
-    if cli.help_requested {
-        ipc::print_help();
-        return;
+fn spawn_background_daemon() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let mut cmd = Command::new(exe);
+    cmd.arg("--daemon")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if cmd.spawn().is_err() {
+        return false;
     }
-    if cli.install_requested {
-        match shortcuts::install_to_user_local() {
-            Ok(msg) => println!("{}", msg),
-            Err(e) => {
-                eprintln!("Install failed: {}", e);
-                std::process::exit(1);
-            }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if bridge::bridge_ready() {
+            return true;
         }
-        return;
+        std::thread::sleep(Duration::from_millis(12));
     }
-    if cli.uninstall_requested {
-        match shortcuts::uninstall_from_user_local() {
-            Ok(msg) => println!("{}", msg),
-            Err(e) => {
-                eprintln!("Uninstall failed: {}", e);
-                std::process::exit(1);
-            }
-        }
-        return;
-    }
+    bridge::bridge_ready()
+}
 
-    // If another Zenhush instance is already running, forward the command
-    // (or toggle visibility if invoked bare) and exit immediately.
-    if let Some(cmd) = cli.command {
-        if ipc::try_send_to_existing(cmd) {
-            return;
-        }
-        if matches!(cmd, ipc::RemoteCmd::Quit) {
-            return;
-        }
-    } else if !cli.start_background && ipc::try_send_to_existing(ipc::RemoteCmd::Toggle) {
-        return;
-    }
-
+fn run_ui_window() {
     #[cfg(target_os = "macos")]
     set_mac_accessory_policy();
 
-    let loaded_settings = settings::load();
-    let start_hidden = cli.start_background || loaded_settings.start_in_background;
+    let client = match bridge::BridgeClient::connect() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("zenhush ui bridge error: {}", e);
+            return;
+        }
+    };
 
-    let audio = audio::AudioEngine::new();
-    let tray = tray::Tray::new();
-    let has_tray = tray.is_some();
-    let ipc_server = ipc::IpcServer::start();
-
-    let (init_w, init_h) = match loaded_settings.window_mode {
+    let loaded = settings::load();
+    let (init_w, init_h) = match loaded.window_mode {
         settings::WindowMode::NotchPill => (286.0_f32, 42.0_f32),
         settings::WindowMode::Card => (336.0_f32, 344.0_f32),
     };
@@ -103,16 +98,13 @@ fn main() {
         .with_always_on_top()
         .with_resizable(false)
         .with_transparent(true)
-        .with_visible(!(start_hidden && has_tray));
+        .with_taskbar(false);
 
-    if has_tray {
-        viewport = viewport.with_taskbar(false);
-    }
     if let Some(icon) = load_app_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
     }
-    if let Some([x, y]) = loaded_settings.saved_pos {
-        if loaded_settings.dock_anchor == settings::DockAnchor::Free {
+    if let Some([x, y]) = loaded.saved_pos {
+        if loaded.dock_anchor == settings::DockAnchor::Free {
             viewport = viewport.with_position(egui::pos2(x, y));
         }
     }
@@ -122,7 +114,7 @@ fn main() {
         ..Default::default()
     };
 
-    let _ = eframe::run_native(
+    if let Err(e) = eframe::run_native(
         "Zenhush",
         options,
         Box::new(move |cc| {
@@ -159,21 +151,97 @@ fn main() {
                 vec!["SchibstedGroteskSemiBold".to_owned()],
             );
             cc.egui_ctx.set_fonts(fonts);
+            client.bind_egui_ctx(&cc.egui_ctx);
 
-            if let Some(ref srv) = ipc_server {
-                srv.bind_egui_ctx(&cc.egui_ctx);
-            }
-            if let Some(ref tr) = tray {
-                tr.bind_egui_ctx(&cc.egui_ctx);
-            }
-
-            Ok(Box::new(app::ZenhushApp::new(
-                audio,
-                tray,
-                ipc_server,
-                loaded_settings,
-                !(start_hidden && has_tray),
-            )))
+            Ok(Box::new(app::ZenhushUiApp::new(client, loaded)))
         }),
-    );
+    ) {
+        eprintln!("zenhush ui run_native error: {:?}", e);
+    }
+}
+
+fn main() {
+    let cli = ipc::parse_cli();
+    if cli.help_requested {
+        ipc::print_help();
+        return;
+    }
+    if cli.install_requested {
+        match shortcuts::install_to_user_local() {
+            Ok(msg) => println!("{}", msg),
+            Err(e) => {
+                eprintln!("Install failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if cli.uninstall_requested {
+        match shortcuts::uninstall_from_user_local() {
+            Ok(msg) => println!("{}", msg),
+            Err(e) => {
+                eprintln!("Uninstall failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if cli.install_gnome_pill {
+        match gnome_ext::install_gnome_pill() {
+            Ok(msg) => println!("{}", msg),
+            Err(e) => {
+                eprintln!("GNOME Pill install failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if cli.uninstall_gnome_pill {
+        match gnome_ext::uninstall_gnome_pill() {
+            Ok(msg) => println!("{}", msg),
+            Err(e) => {
+                eprintln!("GNOME Pill uninstall failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if cli.ui_mode {
+        run_ui_window();
+        return;
+    }
+
+    if cli.daemon_mode || cli.start_background {
+        // Don't spawn duplicate daemon if already running
+        if ipc::try_send_to_existing(ipc::RemoteCmd::Show) {
+            if cli.start_background {
+                return;
+            }
+        }
+        daemon::run_daemon(false);
+        return;
+    }
+
+    // If another instance is already running, forward CLI command (or Toggle) and exit
+    if let Some(cmd) = cli.command {
+        if ipc::try_send_to_existing(cmd) {
+            return;
+        }
+        if matches!(cmd, ipc::RemoteCmd::Quit) {
+            return;
+        }
+    } else if ipc::try_send_to_existing(ipc::RemoteCmd::Toggle) {
+        return;
+    }
+
+    // Fresh launch: start background Core unless user configured start_in_background
+    let loaded = settings::load();
+    if loaded.start_in_background {
+        daemon::run_daemon(false);
+    } else if spawn_background_daemon() {
+        run_ui_window();
+    } else {
+        daemon::run_daemon(true);
+    }
 }

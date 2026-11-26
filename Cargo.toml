@@ -34,9 +34,10 @@ resvg = { version = "0.50", default-features = false }
 # Cross-platform global hotkeys (X11, macOS, Windows; Wayland uses IPC + portal/gsettings)
 global-hotkey = "0.10"
 
-# Linux system tray (pure Rust D-Bus StatusNotifier, zero GTK dependency)
+# Linux system tray (pure Rust D-Bus StatusNotifier, zero GTK dependency) + MPRIS2 D-Bus
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "0.3", features = ["blocking"] }
+zbus = { version = "5", default-features = false, features = ["blocking-api"] }
 
 # macOS & Windows native system tray / menu bar
 [target.'cfg(not(target_os = "linux"))'.dependencies]

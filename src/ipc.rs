@@ -6,10 +6,8 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::sync::mpsc::{channel, Receiver};
-use std::sync::{Arc, Mutex};
-use std::thread;
-
-use eframe::egui;
+use std::sync::Arc;
+use std::thread::{self, Thread};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteCmd {
@@ -66,22 +64,32 @@ impl RemoteCmd {
 
 pub struct CliArgs {
     pub start_background: bool,
+    pub ui_mode: bool,
+    pub daemon_mode: bool,
     pub command: Option<RemoteCmd>,
     pub help_requested: bool,
     pub install_requested: bool,
     pub uninstall_requested: bool,
+    pub install_gnome_pill: bool,
+    pub uninstall_gnome_pill: bool,
 }
 
 pub fn parse_cli() -> CliArgs {
     let mut start_background = false;
+    let mut ui_mode = false;
+    let mut daemon_mode = false;
     let mut command = None;
     let mut help_requested = false;
     let mut install_requested = false;
     let mut uninstall_requested = false;
+    let mut install_gnome_pill = false;
+    let mut uninstall_gnome_pill = false;
 
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--background" | "--minimized" | "-b" => start_background = true,
+            "--ui" => ui_mode = true,
+            "--daemon" => daemon_mode = true,
             "--toggle" | "-t" => command = Some(RemoteCmd::Toggle),
             "--show" => command = Some(RemoteCmd::Show),
             "--play-pause" | "-p" => command = Some(RemoteCmd::PlayPause),
@@ -96,6 +104,8 @@ pub fn parse_cli() -> CliArgs {
             "--quit" => command = Some(RemoteCmd::Quit),
             "--install" => install_requested = true,
             "--uninstall" => uninstall_requested = true,
+            "--install-gnome-pill" => install_gnome_pill = true,
+            "--uninstall-gnome-pill" => uninstall_gnome_pill = true,
             "--help" | "-h" => help_requested = true,
             _ => {}
         }
@@ -103,10 +113,14 @@ pub fn parse_cli() -> CliArgs {
 
     CliArgs {
         start_background,
+        ui_mode,
+        daemon_mode,
         command,
         help_requested,
         install_requested,
         uninstall_requested,
+        install_gnome_pill,
+        uninstall_gnome_pill,
     }
 }
 
@@ -115,22 +129,24 @@ pub fn print_help() {
         "Zenhush — lightweight focus audio machine\n\n\
         Usage: zenhush [OPTIONS]\n\n\
         Options:\n\
-          -b, --background    Start silently in the top bar / system tray\n\
-          -t, --toggle        Toggle popup visibility (wakes running instance)\n\
-              --show          Show and focus Zenhush\n\
-          -p, --play-pause    Toggle playback\n\
-              --play          Start / resume playback\n\
-              --pause         Pause playback\n\
-              --next          Next sound\n\
-              --prev          Previous sound\n\
-              --vol-up        Increase volume (+5%)\n\
-              --vol-down      Decrease volume (-5%)\n\
-              --mute          Toggle mute\n\
-              --notch         Toggle compact Notch Pill mode\n\
-              --quit          Quit running instance\n\
-              --install       Install binary, app launcher & icon to ~/.local\n\
-              --uninstall     Remove installed ~/.local binary, launcher & autostart\n\
-          -h, --help          Show this help"
+          -b, --background           Start silently in the top bar / tray (~15 MB RAM)\n\
+          -t, --toggle               Toggle popup visibility (wakes running instance)\n\
+              --show                 Show and focus Zenhush\n\
+          -p, --play-pause           Toggle playback\n\
+              --play                 Start / resume playback\n\
+              --pause                Pause playback\n\
+              --next                 Next sound\n\
+              --prev                 Previous sound\n\
+              --vol-up               Increase volume (+5%)\n\
+              --vol-down             Decrease volume (-5%)\n\
+              --mute                 Toggle mute\n\
+              --notch                Toggle compact Notch Pill mode\n\
+              --quit                 Quit running instance\n\
+              --install              Install binary, app launcher & icon to ~/.local\n\
+              --uninstall            Remove installed ~/.local binary, launcher & autostart\n\
+              --install-gnome-pill   Install optional GNOME Top-Bar Pill extension\n\
+              --uninstall-gnome-pill Remove GNOME Top-Bar Pill extension\n\
+          -h, --help                 Show this help"
     );
 }
 
@@ -188,16 +204,13 @@ pub fn try_send_to_existing(cmd: RemoteCmd) -> bool {
 
 pub struct IpcServer {
     pub rx: Receiver<RemoteCmd>,
-    egui_ctx: Arc<Mutex<Option<egui::Context>>>,
     #[cfg(unix)]
     sock_path: std::path::PathBuf,
 }
 
 impl IpcServer {
-    pub fn start() -> Option<Self> {
+    pub fn start(wake: Option<Arc<Thread>>) -> Option<Self> {
         let (tx, rx) = channel::<RemoteCmd>();
-        let egui_ctx: Arc<Mutex<Option<egui::Context>>> = Arc::new(Mutex::new(None));
-        let ctx_ref = egui_ctx.clone();
 
         #[cfg(unix)]
         {
@@ -216,10 +229,8 @@ impl IpcServer {
                         if reader.read_line(&mut line).is_ok() {
                             if let Some(cmd) = RemoteCmd::from_wire(&line) {
                                 let _ = tx.send(cmd);
-                                if let Ok(g) = ctx_ref.lock() {
-                                    if let Some(ctx) = &*g {
-                                        ctx.request_repaint();
-                                    }
+                                if let Some(ref t) = wake {
+                                    t.unpark();
                                 }
                             }
                         }
@@ -227,7 +238,6 @@ impl IpcServer {
                 });
             Some(IpcServer {
                 rx,
-                egui_ctx,
                 sock_path: path,
             })
         }
@@ -251,22 +261,14 @@ impl IpcServer {
                         if reader.read_line(&mut line).is_ok() {
                             if let Some(cmd) = RemoteCmd::from_wire(&line) {
                                 let _ = tx.send(cmd);
-                                if let Ok(g) = ctx_ref.lock() {
-                                    if let Some(ctx) = &*g {
-                                        ctx.request_repaint();
-                                    }
+                                if let Some(ref t) = wake {
+                                    t.unpark();
                                 }
                             }
                         }
                     }
                 });
-            Some(IpcServer { rx, egui_ctx })
-        }
-    }
-
-    pub fn bind_egui_ctx(&self, ctx: &egui::Context) {
-        if let Ok(mut g) = self.egui_ctx.lock() {
-            *g = Some(ctx.clone());
+            Some(IpcServer { rx })
         }
     }
 }

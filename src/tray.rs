@@ -20,6 +20,7 @@ pub enum TrayEvent {
     SelectFile,
     ToggleLockDefault,
     SetVolume(u8),
+    VolumeStep(i8),
     ToggleMute,
     SetTimer(u32),
     ToggleNotch,
@@ -131,7 +132,7 @@ mod platform {
 
     struct ZenhushTray {
         tx: Sender<TrayEvent>,
-        egui_ctx: Arc<Mutex<Option<eframe::egui::Context>>>,
+        wake: Option<Arc<std::thread::Thread>>,
         idle_icon: Vec<Icon>,
         active_icon: Vec<Icon>,
         state: TrayState,
@@ -140,10 +141,8 @@ mod platform {
     impl ZenhushTray {
         fn emit(&self, ev: TrayEvent) {
             let _ = self.tx.send(ev);
-            if let Ok(g) = self.egui_ctx.lock() {
-                if let Some(ctx) = &*g {
-                    ctx.request_repaint();
-                }
+            if let Some(ref w) = self.wake {
+                w.unpark();
             }
         }
     }
@@ -184,6 +183,18 @@ mod platform {
 
         fn activate(&mut self, _x: i32, _y: i32) {
             self.emit(TrayEvent::ToggleWindow);
+        }
+
+        fn secondary_activate(&mut self, _x: i32, _y: i32) {
+            self.emit(TrayEvent::TogglePlay);
+        }
+
+        fn scroll(&mut self, delta: i32, _orientation: ksni::Orientation) {
+            if delta > 0 {
+                self.emit(TrayEvent::VolumeStep(5));
+            } else if delta < 0 {
+                self.emit(TrayEvent::VolumeStep(-5));
+            }
         }
 
         fn menu(&self) -> Vec<MenuItem<Self>> {
@@ -407,19 +418,16 @@ mod platform {
     pub struct Tray {
         pub rx: Receiver<TrayEvent>,
         last_state: Arc<Mutex<TrayState>>,
-        egui_ctx: Arc<Mutex<Option<eframe::egui::Context>>>,
         handle: ksni::blocking::Handle<ZenhushTray>,
     }
 
     impl Tray {
-        pub fn new() -> Option<Self> {
+        pub fn new(wake: Option<Arc<std::thread::Thread>>) -> Option<Self> {
             let (tx, rx) = channel::<TrayEvent>();
             let state = TrayState::default();
-            let egui_ctx: Arc<Mutex<Option<eframe::egui::Context>>> =
-                Arc::new(Mutex::new(None));
             let tray = ZenhushTray {
                 tx,
-                egui_ctx: egui_ctx.clone(),
+                wake,
                 idle_icon: to_ksni_icon(false),
                 active_icon: to_ksni_icon(true),
                 state: state.clone(),
@@ -428,15 +436,8 @@ mod platform {
             Some(Tray {
                 rx,
                 last_state: Arc::new(Mutex::new(state)),
-                egui_ctx,
                 handle,
             })
-        }
-
-        pub fn bind_egui_ctx(&self, ctx: &eframe::egui::Context) {
-            if let Ok(mut g) = self.egui_ctx.lock() {
-                *g = Some(ctx.clone());
-            }
         }
 
         pub fn sync_state(&self, next: &TrayState) {
@@ -469,19 +470,16 @@ mod platform {
     pub struct Tray {
         pub rx: Receiver<TrayEvent>,
         last_state: Arc<Mutex<TrayState>>,
-        egui_ctx: Arc<Mutex<Option<eframe::egui::Context>>>,
         tray: TrayIcon,
         idle_icon: Option<tray_icon::Icon>,
         active_icon: Option<tray_icon::Icon>,
     }
 
     impl Tray {
-        pub fn new() -> Option<Self> {
+        pub fn new(wake: Option<Arc<std::thread::Thread>>) -> Option<Self> {
             let (tx, rx) = channel::<TrayEvent>();
             let idle_icon = to_tray_icon(false);
             let active_icon = to_tray_icon(true);
-            let egui_ctx: Arc<Mutex<Option<eframe::egui::Context>>> =
-                Arc::new(Mutex::new(None));
 
             let menu = Menu::new();
             let item_show = MenuItem::with_id("show", "Show / Hide Zenhush", true, None);
@@ -508,7 +506,7 @@ mod platform {
             let tray = builder.build().ok()?;
 
             let tx_click = tx.clone();
-            let ctx_click = egui_ctx.clone();
+            let wake_click = wake.clone();
             std::thread::spawn(move || {
                 let receiver = TrayIconEvent::receiver();
                 while let Ok(ev) = receiver.recv() {
@@ -519,17 +517,14 @@ mod platform {
                     } = ev
                     {
                         let _ = tx_click.send(TrayEvent::ToggleWindow);
-                        if let Ok(g) = ctx_click.lock() {
-                            if let Some(ctx) = &*g {
-                                ctx.request_repaint();
-                            }
+                        if let Some(ref w) = wake_click {
+                            w.unpark();
                         }
                     }
                 }
             });
 
             let tx_menu = tx;
-            let ctx_menu = egui_ctx.clone();
             std::thread::spawn(move || {
                 let receiver = MenuEvent::receiver();
                 while let Ok(ev) = receiver.recv() {
@@ -543,10 +538,8 @@ mod platform {
                     };
                     if let Some(ev) = mapped {
                         let _ = tx_menu.send(ev);
-                        if let Ok(g) = ctx_menu.lock() {
-                            if let Some(ctx) = &*g {
-                                ctx.request_repaint();
-                            }
+                        if let Some(ref w) = wake {
+                            w.unpark();
                         }
                     }
                 }
@@ -555,17 +548,10 @@ mod platform {
             Some(Tray {
                 rx,
                 last_state: Arc::new(Mutex::new(TrayState::default())),
-                egui_ctx,
                 tray,
                 idle_icon,
                 active_icon,
             })
-        }
-
-        pub fn bind_egui_ctx(&self, ctx: &eframe::egui::Context) {
-            if let Ok(mut g) = self.egui_ctx.lock() {
-                *g = Some(ctx.clone());
-            }
         }
 
         pub fn sync_state(&self, next: &TrayState) {

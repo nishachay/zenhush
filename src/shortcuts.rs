@@ -9,9 +9,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::mpsc::{channel, Receiver};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::thread::Thread;
 
-use eframe::egui;
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
@@ -26,27 +26,22 @@ pub struct ShortcutManager {
     toggle_hotkey: Option<HotKey>,
     play_hotkey: Option<HotKey>,
     event_rx: Option<Receiver<GlobalHotKeyEvent>>,
-    egui_ctx: Arc<Mutex<Option<egui::Context>>>,
     pub status_note: String,
 }
 
 impl ShortcutManager {
-    pub fn new(toggle_str: &str, play_str: &str) -> Self {
+    pub fn new(toggle_str: &str, play_str: &str, wake: Option<Arc<Thread>>) -> Self {
         let manager = GlobalHotKeyManager::new().ok();
-        let egui_ctx: Arc<Mutex<Option<egui::Context>>> = Arc::new(Mutex::new(None));
         let event_rx = if manager.is_some() {
             let (tx, rx) = channel::<GlobalHotKeyEvent>();
-            let wake_ctx = egui_ctx.clone();
             let _ = std::thread::Builder::new()
                 .name("zenhush-hotkey-wake".into())
                 .spawn(move || {
                     let g_rx = GlobalHotKeyEvent::receiver();
                     while let Ok(ev) = g_rx.recv() {
                         let _ = tx.send(ev);
-                        if let Ok(g) = wake_ctx.lock() {
-                            if let Some(ctx) = &*g {
-                                ctx.request_repaint();
-                            }
+                        if let Some(ref w) = wake {
+                            w.unpark();
                         }
                     }
                 });
@@ -60,19 +55,10 @@ impl ShortcutManager {
             toggle_hotkey: None,
             play_hotkey: None,
             event_rx,
-            egui_ctx,
             status_note: String::new(),
         };
         s.apply(toggle_str, play_str);
         s
-    }
-
-    pub fn bind_egui_ctx(&self, ctx: &egui::Context) {
-        if let Ok(mut g) = self.egui_ctx.lock() {
-            if g.is_none() {
-                *g = Some(ctx.clone());
-            }
-        }
     }
 
     pub fn apply(&mut self, toggle_str: &str, play_str: &str) {

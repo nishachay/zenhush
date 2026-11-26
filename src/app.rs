@@ -1,32 +1,29 @@
-//! Zenhush UI & UX: Top-Bar / Notch Pill + Full Focus Card,
-//! local track library with Lock-as-Default, atmosphere layering,
-//! instant volume & mute, and global + in-app keyboard shortcuts.
+//! Zenhush UI Window (`--ui`): lightweight on-demand Card & Notch Pill.
+//!
+//! Connects to the ~15 MB background Core over `BridgeClient`, renders
+//! smoothly when open, and exits cleanly on hide/close to free GPU/Mesa RAM.
 
-use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use egui::{Color32, CornerRadius, Key, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 
-use crate::audio::AudioEngine;
-use crate::filemode::{self, FileStreamHandle};
+use crate::bridge::{BridgeClient, CoreToUi, UiCmd, UiSnapshot};
 use crate::icons::{IconCache, IconKind};
-use crate::ipc::{IpcServer, RemoteCmd};
-use crate::settings::{self, DockAnchor, LocalTrack, Settings, ThemeMode, WindowMode};
-use crate::shortcuts::{self, GlobalAction, ShortcutManager};
-use crate::synth::{FileTone, Sound, DEFAULT_DEPTH, DEFAULT_RUMBLE, DEFAULT_VOLUME};
+use crate::settings::{DockAnchor, Settings, ThemeMode, WindowMode};
+use crate::shortcuts;
+use crate::synth::{FileTone, Sound};
 use crate::theme::{Theme, DARK, LIGHT};
-use crate::tray::{Tray, TrayEvent, TrayState};
 
 const CARD_W: f32 = 336.0;
 const CARD_CLOSED_H: f32 = 344.0;
-const CARD_OPEN_H: f32 = 594.0;
+const CARD_OPEN_H: f32 = 602.0;
 const NOTCH_W: f32 = 286.0;
 const NOTCH_H: f32 = 42.0;
 
 const BAR_COUNT: usize = 18;
-const IDLE_HEIGHTS: [f32; BAR_COUNT] = [
+const IDLE_BARS: [f32; BAR_COUNT] = [
     0.26, 0.42, 0.65, 0.50, 0.36, 0.78, 0.92, 0.60, 0.44, 0.85, 0.72, 0.48, 0.62, 0.38, 0.54,
     0.40, 0.32, 0.24,
 ];
@@ -77,158 +74,46 @@ fn truncate_chars(s: &str, max: usize) -> String {
     }
 }
 
-pub struct ZenhushApp {
-    audio: AudioEngine,
-    tray: Option<Tray>,
-    ipc: Option<IpcServer>,
-    shortcuts: ShortcutManager,
-
-    // Sound & track selection
-    is_file_mode: bool,
-    active_sound_idx: usize,
-    active_file: Option<PathBuf>,
-    locked_default_file: Option<PathBuf>,
-    local_tracks: Vec<LocalTrack>,
-    file_tone: FileTone,
-    loop_crossfade: bool,
-    layer_sound: Option<Sound>,
-    layer_mix: u8,
-
-    // Playback & timers
-    playing: bool,
-    has_played: bool,
-    elapsed: Duration,
-    last_tick: Instant,
-    timer_minutes: u32,
-    timer_remaining: Option<Duration>,
-    timer_end: Option<Instant>,
-
-    // UI state
-    theme_mode: ThemeMode,
-    reduce_motion: bool,
-    window_mode: WindowMode,
-    dock_anchor: DockAnchor,
-    saved_pos: Option<[f32; 2]>,
-    pinned: bool,
-    auto_play_on_launch: bool,
-    start_in_background: bool,
-    autostart_enabled: bool,
-    global_shortcut_toggle: String,
-    global_shortcut_play: String,
-
+pub struct ZenhushUiApp {
+    client: BridgeClient,
+    snap: UiSnapshot,
+    icons: IconCache,
     drawer_open: bool,
     drawer_tab: DrawerTab,
-    visible: bool,
     was_focused: bool,
     modal_open: bool,
     suppress_hide_until: Instant,
     anchor_applied: bool,
     last_window_size: [f32; 2],
     last_pos_change: Option<Instant>,
-
-    // Visualizer & status
-    rms_history: VecDeque<f32>,
-    bar_heights: [f32; BAR_COUNT],
-    bar_accent: usize,
-    icons: IconCache,
-    notice: Option<(String, bool)>, // (message, is_error)
-    notice_until: Option<Instant>,
-    missing_locked_file: Option<PathBuf>,
 }
 
-impl ZenhushApp {
-    pub fn new(
-        mut audio: AudioEngine,
-        tray: Option<Tray>,
-        ipc: Option<IpcServer>,
-        mut settings: Settings,
-        start_visible: bool,
-    ) -> Self {
-        audio.set_volume(settings.volume);
-        audio.set_muted(settings.muted);
-        audio.set_depth(settings.depth);
-        audio.set_rumble(settings.rumble);
-        audio.set_layer(settings.layer_sound);
-        audio.set_layer_mix(settings.layer_mix);
-        audio.set_file_tone(settings.file_tone);
-
-        // Migrate / ensure locked default file is in local_tracks
-        if let Some(ref locked) = settings.locked_default_file {
-            if !settings.local_tracks.iter().any(|t| &t.path == locked) {
-                let title = locked
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "Audio Track".to_string());
-                let dur = filemode::probe_file(locked)
-                    .ok()
-                    .and_then(|p| p.duration_secs);
-                settings.local_tracks.insert(
-                    0,
-                    LocalTrack {
-                        path: locked.clone(),
-                        title,
-                        duration_secs: dur,
-                    },
-                );
-            }
-        }
-
-        // Resolve initial source: locked default local audio file ALWAYS wins on launch!
-        let mut is_file_mode = false;
-        let mut active_file = settings.active_file.clone();
-        let mut missing_locked_file = None;
-        let mut notice = None;
-
-        if let Some(ref locked) = settings.locked_default_file {
-            if locked.is_file() {
-                is_file_mode = true;
-                active_file = Some(locked.clone());
-            } else {
-                missing_locked_file = Some(locked.clone());
-                notice = Some((
-                    "Locked default audio file was moved or deleted".to_string(),
-                    true,
-                ));
-            }
-        } else if settings.active_is_file {
-            if let Some(ref p) = settings.active_file {
-                if p.is_file() {
-                    is_file_mode = true;
-                }
-            }
-        }
-
-        let active_sound_idx = Sound::ALL
-            .iter()
-            .position(|&s| s == settings.active_sound)
-            .unwrap_or(0);
-
-        let shortcuts = ShortcutManager::new(
-            &settings.global_shortcut_toggle,
-            &settings.global_shortcut_play,
-        );
-
-        let mut app = ZenhushApp {
-            audio,
-            tray,
-            ipc,
-            shortcuts,
-            is_file_mode,
-            active_sound_idx,
-            active_file,
+impl ZenhushUiApp {
+    pub fn new(client: BridgeClient, settings: Settings) -> Self {
+        let snap = UiSnapshot {
+            playing: false,
+            has_played: false,
+            is_file_mode: settings.active_is_file || settings.locked_default_file.is_some(),
+            active_sound: settings.active_sound,
+            active_file: settings.locked_default_file.clone().or(settings.active_file),
             locked_default_file: settings.locked_default_file,
             local_tracks: settings.local_tracks,
             file_tone: settings.file_tone,
             loop_crossfade: settings.loop_crossfade,
             layer_sound: settings.layer_sound,
             layer_mix: settings.layer_mix,
-            playing: false,
-            has_played: false,
-            elapsed: Duration::ZERO,
-            last_tick: Instant::now(),
+            volume: settings.volume,
+            muted: settings.muted,
+            depth: settings.depth,
+            rumble: settings.rumble,
+            elapsed_secs: 0,
             timer_minutes: settings.timer_minutes,
-            timer_remaining: None,
-            timer_end: None,
+            timer_remaining_secs: None,
+            rms_bars: IDLE_BARS.to_vec(),
+            audio_error: None,
+            device_name: "System Default".to_string(),
+            notice: None,
+            missing_locked_file: None,
             theme_mode: settings.theme,
             reduce_motion: settings.reduce_motion,
             window_mode: settings.window_mode,
@@ -238,59 +123,46 @@ impl ZenhushApp {
             auto_play_on_launch: settings.auto_play_on_launch,
             start_in_background: settings.start_in_background,
             autostart_enabled: shortcuts::is_autostart_enabled(),
+            gnome_pill_installed: false,
             global_shortcut_toggle: settings.global_shortcut_toggle,
             global_shortcut_play: settings.global_shortcut_play,
+            shortcut_status: String::new(),
+            has_tray: true,
+        };
+
+        ZenhushUiApp {
+            client,
+            snap,
+            icons: IconCache::new(),
             drawer_open: false,
             drawer_tab: DrawerTab::Files,
-            visible: start_visible,
             was_focused: false,
             modal_open: false,
-            suppress_hide_until: Instant::now() + Duration::from_millis(500),
+            suppress_hide_until: Instant::now() + Duration::from_millis(450),
             anchor_applied: false,
             last_window_size: match settings.window_mode {
                 WindowMode::NotchPill => [NOTCH_W, NOTCH_H],
                 WindowMode::Card => [CARD_W, CARD_CLOSED_H],
             },
             last_pos_change: None,
-            rms_history: VecDeque::with_capacity(64),
-            bar_heights: IDLE_HEIGHTS,
-            bar_accent: 6,
-            icons: IconCache::new(),
-            notice,
-            notice_until: None,
-            missing_locked_file,
-        };
-
-        if app.timer_minutes > 0 {
-            app.arm_timer();
         }
-        if app.auto_play_on_launch {
-            app.play_selected();
-        }
-        app.sync_tray();
-        app
     }
 
-    fn set_notice(&mut self, msg: impl Into<String>, is_error: bool) {
-        self.notice = Some((msg.into(), is_error));
-        self.notice_until = Some(Instant::now() + Duration::from_secs(if is_error { 6 } else { 3 }));
-    }
-
-    fn current_sound(&self) -> Sound {
-        Sound::ALL[self.active_sound_idx]
+    fn send(&self, cmd: UiCmd) {
+        self.client.send(&cmd);
     }
 
     fn is_current_locked_default(&self) -> bool {
-        self.is_file_mode
-            && self.active_file.is_some()
-            && self.active_file == self.locked_default_file
+        self.snap.is_file_mode
+            && self.snap.active_file.is_some()
+            && self.snap.active_file == self.snap.locked_default_file
     }
 
     fn active_track_title(&self) -> String {
-        let Some(path) = &self.active_file else {
+        let Some(path) = &self.snap.active_file else {
             return "Local File".to_string();
         };
-        if let Some(t) = self.local_tracks.iter().find(|t| &t.path == path) {
+        if let Some(t) = self.snap.local_tracks.iter().find(|t| &t.path == path) {
             return t.title.clone();
         }
         path.file_name()
@@ -299,155 +171,77 @@ impl ZenhushApp {
     }
 
     fn display_title(&self) -> String {
-        if self.is_file_mode {
-            if self.active_file.is_some() {
+        if self.snap.is_file_mode {
+            if self.snap.active_file.is_some() {
                 truncate_chars(&self.active_track_title(), 22)
             } else {
                 "Local Audio".to_string()
             }
         } else {
-            self.current_sound().title().to_string()
+            self.snap.active_sound.title().to_string()
         }
     }
 
     fn display_subtitle(&self) -> String {
-        if !self.playing && !self.has_played {
+        if !self.snap.playing && !self.snap.has_played {
             if self.is_current_locked_default() {
                 return "locked default • press play".to_string();
             }
             return "press play to focus".to_string();
         }
-        if self.is_file_mode {
+        if self.snap.is_file_mode {
             if self.is_current_locked_default() {
                 "locked default track".to_string()
             } else {
                 "local audio loop".to_string()
             }
-        } else if let Some(layer) = self.layer_sound {
+        } else if let Some(layer) = self.snap.layer_sound {
             format!(
                 "{} + {}",
-                self.current_sound().subtitle(),
+                self.snap.active_sound.subtitle(),
                 layer.short_label().to_lowercase()
             )
         } else {
-            self.current_sound().subtitle().to_string()
+            self.snap.active_sound.subtitle().to_string()
         }
     }
 
     fn status_badge(&self) -> String {
-        if let Some(_err) = self.audio.audio_error() {
+        if self.snap.audio_error.is_some() {
             return "No audio device".to_string();
         }
-        if let Some(rem) = self.timer_remaining {
-            if self.playing || rem.as_millis() > 0 {
-                return format_duration(rem.as_secs());
+        if let Some(rem) = self.snap.timer_remaining_secs {
+            if self.snap.playing || rem > 0 {
+                return format_duration(rem);
             }
         }
-        if !self.has_played {
+        if !self.snap.has_played {
             return if self.is_current_locked_default() {
                 "LOCKED".to_string()
             } else {
                 "READY".to_string()
             };
         }
-        if !self.playing {
+        if !self.snap.playing {
             return "Paused".to_string();
         }
-        if self.is_file_mode {
-            if self.layer_sound.is_some() {
+        if self.snap.is_file_mode {
+            if self.snap.layer_sound.is_some() {
                 "File + Mix".to_string()
             } else if self.is_current_locked_default() {
                 "Locked File".to_string()
             } else {
                 "File".to_string()
             }
-        } else if self.layer_sound.is_some() {
+        } else if self.snap.layer_sound.is_some() {
             "Layered".to_string()
         } else {
             "Live".to_string()
         }
     }
 
-    fn save_settings(&self) {
-        let s = Settings {
-            volume: self.audio.volume(),
-            muted: self.audio.is_muted(),
-            depth: self.audio.depth(),
-            rumble: self.audio.rumble(),
-            active_is_file: self.is_file_mode,
-            active_sound: self.current_sound(),
-            active_file: self.active_file.clone(),
-            locked_default_file: self.locked_default_file.clone(),
-            local_tracks: self.local_tracks.clone(),
-            file_tone: self.file_tone,
-            loop_crossfade: self.loop_crossfade,
-            layer_sound: self.layer_sound,
-            layer_mix: self.layer_mix,
-            theme: self.theme_mode,
-            reduce_motion: self.reduce_motion,
-            timer_minutes: self.timer_minutes,
-            window_mode: self.window_mode,
-            dock_anchor: self.dock_anchor,
-            saved_pos: self.saved_pos,
-            pinned: self.pinned,
-            auto_play_on_launch: self.auto_play_on_launch,
-            start_in_background: self.start_in_background,
-            global_shortcut_toggle: self.global_shortcut_toggle.clone(),
-            global_shortcut_play: self.global_shortcut_play.clone(),
-        };
-        settings::save(&s);
-    }
-
-    fn sync_tray(&self) {
-        let Some(tray) = &self.tray else {
-            return;
-        };
-        let timer_label = self
-            .timer_remaining
-            .filter(|r| r.as_secs() > 0)
-            .map(|r| format_duration(r.as_secs()))
-            .unwrap_or_default();
-
-        let state_word = if self.playing {
-            "Playing"
-        } else if self.has_played {
-            "Paused"
-        } else {
-            "Ready"
-        };
-        let vol_word = if self.audio.is_muted() {
-            "Muted".to_string()
-        } else {
-            format!("{}%", self.audio.volume())
-        };
-        let tooltip = format!(
-            "Zenhush — {} • {} ({})",
-            self.display_title(),
-            state_word,
-            vol_word
-        );
-
-        tray.sync_state(&TrayState {
-            playing: self.playing,
-            sound_title: self.display_title(),
-            is_file: self.is_file_mode,
-            has_file: self.active_file.is_some(),
-            file_title: truncate_chars(&self.active_track_title(), 22),
-            is_locked_default: self.locked_default_file.is_some()
-                && self.locked_default_file == self.active_file,
-            volume: self.audio.volume(),
-            muted: self.audio.is_muted(),
-            timer_minutes: self.timer_minutes,
-            timer_label,
-            notch_mode: self.window_mode == WindowMode::NotchPill,
-            pinned: self.pinned,
-            visible: self.visible,
-            tooltip,
-        });
-    }
-
     fn target_size(&self) -> Vec2 {
-        match self.window_mode {
+        match self.snap.window_mode {
             WindowMode::NotchPill => Vec2::new(NOTCH_W, NOTCH_H),
             WindowMode::Card => {
                 let mut h = if self.drawer_open {
@@ -455,10 +249,10 @@ impl ZenhushApp {
                 } else {
                     CARD_CLOSED_H
                 };
-                if self.notice.is_some() || self.missing_locked_file.is_some() {
+                if self.snap.notice.is_some() || self.snap.missing_locked_file.is_some() {
                     h += 28.0;
                 }
-                if self.tray.is_none() {
+                if !self.snap.has_tray {
                     h += 24.0;
                 }
                 Vec2::new(CARD_W, h)
@@ -473,113 +267,31 @@ impl ZenhushApp {
         {
             self.last_window_size = [size.x, size.y];
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-            if self.dock_anchor != DockAnchor::Free {
+            if self.snap.dock_anchor != DockAnchor::Free {
                 self.anchor_applied = false;
             }
         }
 
         if !self.anchor_applied {
             if let Some(mon) = ctx.input(|i| i.viewport().monitor_size) {
-                let pos = match self.dock_anchor {
+                let pos = match self.snap.dock_anchor {
                     DockAnchor::TopCenter => {
-                        let y = if self.window_mode == WindowMode::NotchPill {
+                        let y = if self.snap.window_mode == WindowMode::NotchPill {
                             6.0
                         } else {
                             36.0
                         };
                         Some(Pos2::new(((mon.x - size.x) * 0.5).max(8.0), y))
                     }
-                    DockAnchor::TopRight => Some(Pos2::new((mon.x - size.x - 16.0).max(8.0), 36.0)),
-                    DockAnchor::Free => self.saved_pos.map(|[x, y]| Pos2::new(x, y)),
+                    DockAnchor::TopRight => {
+                        Some(Pos2::new((mon.x - size.x - 16.0).max(8.0), 36.0))
+                    }
+                    DockAnchor::Free => self.snap.saved_pos.map(|[x, y]| Pos2::new(x, y)),
                 };
                 if let Some(p) = pos {
                     ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(p));
                 }
                 self.anchor_applied = true;
-            }
-        }
-    }
-
-    fn show_window(&mut self, ctx: &egui::Context) {
-        self.visible = true;
-        self.was_focused = false;
-        self.suppress_hide_until = Instant::now() + Duration::from_millis(350);
-        self.anchor_applied = false;
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        self.sync_tray();
-    }
-
-    fn hide_window(&mut self, ctx: &egui::Context) {
-        if self.tray.is_none() {
-            return;
-        }
-        self.visible = false;
-        self.was_focused = false;
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-        self.sync_tray();
-    }
-
-    fn toggle_window(&mut self, ctx: &egui::Context) {
-        if self.visible {
-            self.hide_window(ctx);
-        } else {
-            self.show_window(ctx);
-        }
-    }
-
-    fn toggle_notch_mode(&mut self, ctx: &egui::Context) {
-        self.window_mode = match self.window_mode {
-            WindowMode::Card => WindowMode::NotchPill,
-            WindowMode::NotchPill => WindowMode::Card,
-        };
-        if !self.visible {
-            self.show_window(ctx);
-        }
-        self.anchor_applied = false;
-        self.apply_window_geometry(ctx);
-        self.save_settings();
-        self.sync_tray();
-    }
-
-    fn add_or_select_local_file(&mut self, path: PathBuf, play_now: bool, lock_default: bool) {
-        match filemode::probe_file(&path) {
-            Ok(probe) => {
-                let title = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "Audio Track".to_string());
-                if let Some(existing) = self.local_tracks.iter_mut().find(|t| t.path == path) {
-                    existing.title = title.clone();
-                    if probe.duration_secs.is_some() {
-                        existing.duration_secs = probe.duration_secs;
-                    }
-                } else {
-                    self.local_tracks.insert(
-                        0,
-                        LocalTrack {
-                            path: path.clone(),
-                            title,
-                            duration_secs: probe.duration_secs,
-                        },
-                    );
-                }
-                self.active_file = Some(path.clone());
-                self.is_file_mode = true;
-                self.missing_locked_file = None;
-                if lock_default {
-                    self.locked_default_file = Some(path.clone());
-                    self.set_notice("Locked as default audio", false);
-                }
-                self.save_settings();
-                if play_now {
-                    self.play_selected();
-                } else {
-                    self.sync_tray();
-                }
-            }
-            Err(e) => {
-                self.set_notice(e, true);
             }
         }
     }
@@ -594,219 +306,37 @@ impl ZenhushApp {
         self.suppress_hide_until = Instant::now() + Duration::from_millis(450);
 
         if let Some(path) = picked {
-            self.add_or_select_local_file(path, true, lock_after);
-        }
-    }
-
-    fn toggle_lock_for_path(&mut self, path: &Path) {
-        if self.locked_default_file.as_deref() == Some(path) {
-            self.locked_default_file = None;
-            self.set_notice("Unlocked default audio", false);
-        } else {
-            self.locked_default_file = Some(path.to_path_buf());
-            self.set_notice("Locked as default audio on launch", false);
-        }
-        self.missing_locked_file = None;
-        self.save_settings();
-        self.sync_tray();
-    }
-
-    fn play_selected(&mut self) {
-        self.has_played = true;
-        if self.is_file_mode {
-            let Some(path) = self.active_file.clone() else {
-                self.pick_local_file(false);
-                return;
-            };
-            let handle = FileStreamHandle::new(path.clone(), self.loop_crossfade);
-            let name = self.active_track_title();
-            match self.audio.play_file(handle, name) {
-                Ok(()) => {
-                    self.playing = true;
-                    self.missing_locked_file = None;
-                    if let Some((msg, true)) = &self.notice {
-                        let _ = msg;
-                        self.notice = None;
-                    }
-                }
-                Err(e) => {
-                    self.playing = false;
-                    self.set_notice(e, true);
-                    self.sync_tray();
-                    return;
-                }
+            self.snap.active_file = Some(path.clone());
+            self.snap.is_file_mode = true;
+            if lock_after {
+                self.snap.locked_default_file = Some(path.clone());
             }
-        } else {
-            self.audio.play_sound(self.current_sound());
-            self.playing = true;
-        }
-        self.elapsed = Duration::ZERO;
-        self.resume_timer();
-        self.save_settings();
-        self.sync_tray();
-    }
-
-    fn select_live_sound(&mut self, sound: Sound) {
-        if let Some(idx) = Sound::ALL.iter().position(|&s| s == sound) {
-            self.active_sound_idx = idx;
-            self.is_file_mode = false;
-            self.save_settings();
-            if self.playing {
-                self.play_selected();
-            } else {
-                self.sync_tray();
-            }
+            self.send(UiCmd::AddLocalFile {
+                path,
+                play_now: true,
+                lock_default: lock_after,
+            });
         }
     }
 
-    fn select_file_mode(&mut self) {
-        if self.active_file.is_none() {
-            if let Some(first) = self.local_tracks.first().map(|t| t.path.clone()) {
-                self.active_file = Some(first);
-            } else {
-                self.pick_local_file(false);
-                return;
-            }
-        }
-        self.is_file_mode = true;
-        self.save_settings();
-        if self.playing {
-            self.play_selected();
-        } else {
-            self.sync_tray();
-        }
-    }
-
-    fn toggle_play(&mut self) {
-        if self.playing {
-            self.audio.pause();
-            self.playing = false;
-            self.freeze_timer();
-            self.sync_tray();
-        } else if self.has_played && self.audio.has_loaded_source() && self.audio.is_file() == self.is_file_mode {
-            self.audio.resume();
-            self.playing = true;
-            self.resume_timer();
-            self.sync_tray();
-        } else {
-            self.play_selected();
-        }
-    }
-
-    fn step_sound(&mut self, dir: i32) {
-        let total = Sound::ALL.len() + usize::from(self.active_file.is_some());
-        if total == 0 {
-            return;
-        }
-        let cur = if self.is_file_mode {
-            Sound::ALL.len() as i32
-        } else {
-            self.active_sound_idx as i32
+    fn toggle_notch_mode(&mut self, ctx: &egui::Context) {
+        let next = match self.snap.window_mode {
+            WindowMode::Card => WindowMode::NotchPill,
+            WindowMode::NotchPill => WindowMode::Card,
         };
-        let next = (cur + dir).rem_euclid(total as i32) as usize;
-        if next == Sound::ALL.len() {
-            self.is_file_mode = true;
-        } else {
-            self.is_file_mode = false;
-            self.active_sound_idx = next;
-        }
-        self.save_settings();
-        if self.playing {
-            self.play_selected();
-        } else {
-            self.sync_tray();
-        }
+        self.snap.window_mode = next;
+        self.anchor_applied = false;
+        self.apply_window_geometry(ctx);
+        self.send(UiCmd::SetWindowMode(next));
     }
 
-    fn restart_playback(&mut self) {
-        self.has_played = true;
-        if self.is_file_mode && self.active_file.is_none() {
-            self.pick_local_file(false);
-            return;
-        }
-        if !self.audio.has_loaded_source() || self.audio.is_file() != self.is_file_mode {
-            self.play_selected();
-            return;
-        }
-        self.audio.restart();
-        self.elapsed = Duration::ZERO;
-        self.playing = true;
-        self.resume_timer();
-        self.sync_tray();
-    }
-
-    fn set_volume(&mut self, v: u8) {
-        self.audio.set_volume(v.min(100));
-        self.save_settings();
-        self.sync_tray();
-    }
-
-    fn toggle_mute(&mut self) {
-        let m = !self.audio.is_muted();
-        self.audio.set_muted(m);
-        self.save_settings();
-        self.sync_tray();
-    }
-
-    fn arm_timer(&mut self) {
-        if self.timer_minutes == 0 {
-            self.timer_remaining = None;
-            self.timer_end = None;
-            self.audio.set_master_fade(1.0);
-            self.sync_tray();
-            return;
-        }
-        let dur = Duration::from_secs(self.timer_minutes as u64 * 60);
-        self.timer_remaining = Some(dur);
-        if self.playing {
-            self.timer_end = Some(Instant::now() + dur);
-        } else {
-            self.timer_end = None;
-        }
-        self.audio.set_master_fade(1.0);
-        self.sync_tray();
-    }
-
-    fn cycle_timer(&mut self) {
-        let idx = TIMER_CHOICES
-            .iter()
-            .position(|&(m, _)| m == self.timer_minutes)
-            .unwrap_or(0);
-        let next = (idx + 1) % TIMER_CHOICES.len();
-        self.timer_minutes = TIMER_CHOICES[next].0;
-        self.arm_timer();
-        self.save_settings();
-    }
-
-    fn freeze_timer(&mut self) {
-        if let Some(end) = self.timer_end {
-            let rem = end.saturating_duration_since(Instant::now());
-            self.timer_remaining = Some(rem);
-            self.timer_end = None;
-        }
-    }
-
-    fn resume_timer(&mut self) {
-        if let Some(rem) = self.timer_remaining {
-            if rem.as_millis() > 0 {
-                self.timer_end = Some(Instant::now() + rem);
-            }
-        }
-    }
-
-    fn reset_sound_controls(&mut self) {
-        self.audio.set_volume(DEFAULT_VOLUME);
-        self.audio.set_muted(false);
-        self.audio.set_depth(DEFAULT_DEPTH);
-        self.audio.set_rumble(DEFAULT_RUMBLE);
-        self.layer_sound = None;
-        self.audio.set_layer(None);
-        self.save_settings();
-        self.sync_tray();
+    fn close_popup(&self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        ctx.request_repaint();
     }
 
     fn theme(&self, ctx: &egui::Context) -> Theme {
-        match self.theme_mode {
+        match self.snap.theme_mode {
             ThemeMode::Light => LIGHT,
             ThemeMode::Dark => DARK,
             ThemeMode::Auto => {
@@ -819,95 +349,7 @@ impl ZenhushApp {
         }
     }
 
-    fn process_external_events(&mut self, ctx: &egui::Context) {
-        // 1. IPC commands (e.g. `zenhush --toggle` or GNOME Wayland shortcut)
-        let ipc_cmds: Vec<RemoteCmd> = match &self.ipc {
-            Some(srv) => {
-                let mut v = Vec::new();
-                while let Ok(c) = srv.rx.try_recv() {
-                    v.push(c);
-                }
-                v
-            }
-            None => Vec::new(),
-        };
-        for cmd in ipc_cmds {
-            match cmd {
-                RemoteCmd::Toggle => self.toggle_window(ctx),
-                RemoteCmd::Show => self.show_window(ctx),
-                RemoteCmd::PlayPause => self.toggle_play(),
-                RemoteCmd::Play => {
-                    if !self.playing {
-                        self.toggle_play();
-                    }
-                }
-                RemoteCmd::Pause => {
-                    if self.playing {
-                        self.toggle_play();
-                    }
-                }
-                RemoteCmd::Next => self.step_sound(1),
-                RemoteCmd::Prev => self.step_sound(-1),
-                RemoteCmd::VolUp => self.set_volume(self.audio.volume().saturating_add(5)),
-                RemoteCmd::VolDown => self.set_volume(self.audio.volume().saturating_sub(5)),
-                RemoteCmd::Mute => self.toggle_mute(),
-                RemoteCmd::ToggleNotch => self.toggle_notch_mode(ctx),
-                RemoteCmd::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-            }
-        }
-
-        // 2. Global hotkeys (X11 / macOS / Windows)
-        for action in self.shortcuts.poll() {
-            match action {
-                GlobalAction::TogglePopup => self.toggle_window(ctx),
-                GlobalAction::TogglePlay => self.toggle_play(),
-            }
-        }
-
-        // 3. System tray events
-        let tray_events: Vec<TrayEvent> = match &self.tray {
-            Some(t) => {
-                let mut v = Vec::new();
-                while let Ok(ev) = t.rx.try_recv() {
-                    v.push(ev);
-                }
-                v
-            }
-            None => Vec::new(),
-        };
-        for ev in tray_events {
-            match ev {
-                TrayEvent::ToggleWindow => self.toggle_window(ctx),
-                TrayEvent::TogglePlay => self.toggle_play(),
-                TrayEvent::NextSound => self.step_sound(1),
-                TrayEvent::PrevSound => self.step_sound(-1),
-                TrayEvent::SelectSound(s) => self.select_live_sound(s),
-                TrayEvent::SelectFile => self.select_file_mode(),
-                TrayEvent::ToggleLockDefault => {
-                    if let Some(p) = self.active_file.clone() {
-                        self.toggle_lock_for_path(&p);
-                    }
-                }
-                TrayEvent::SetVolume(v) => self.set_volume(v),
-                TrayEvent::ToggleMute => self.toggle_mute(),
-                TrayEvent::SetTimer(m) => {
-                    self.timer_minutes = m;
-                    self.arm_timer();
-                    self.save_settings();
-                }
-                TrayEvent::ToggleNotch => self.toggle_notch_mode(ctx),
-                TrayEvent::TogglePin => {
-                    self.pinned = !self.pinned;
-                    self.save_settings();
-                    self.sync_tray();
-                }
-                TrayEvent::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-            }
-        }
-    }
-
-    fn handle_in_app_shortcuts(&mut self, ctx: &egui::Context) {
-        // Skip single-letter shortcuts if user is typing in a text input (shortcut fields)
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.wants_keyboard_input() {
             return;
         }
@@ -975,27 +417,42 @@ impl ZenhushApp {
 
         for a in actions {
             match a {
-                0 => self.toggle_play(),
-                1 => self.step_sound(-1),
-                2 => self.step_sound(1),
-                3 => self.set_volume(self.audio.volume().saturating_add(5)),
-                30 => self.set_volume(self.audio.volume().saturating_add(1)),
-                4 => self.set_volume(self.audio.volume().saturating_sub(5)),
-                40 => self.set_volume(self.audio.volume().saturating_sub(1)),
-                5 => self.toggle_mute(),
-                6 => self.restart_playback(),
+                0 => self.send(UiCmd::TogglePlay),
+                1 => self.send(UiCmd::StepSound(-1)),
+                2 => self.send(UiCmd::StepSound(1)),
+                3 => {
+                    let v = self.snap.volume.saturating_add(5).min(100);
+                    self.snap.volume = v;
+                    self.send(UiCmd::SetVolume(v));
+                }
+                30 => {
+                    let v = self.snap.volume.saturating_add(1).min(100);
+                    self.snap.volume = v;
+                    self.send(UiCmd::SetVolume(v));
+                }
+                4 => {
+                    let v = self.snap.volume.saturating_sub(5);
+                    self.snap.volume = v;
+                    self.send(UiCmd::SetVolume(v));
+                }
+                40 => {
+                    let v = self.snap.volume.saturating_sub(1);
+                    self.snap.volume = v;
+                    self.send(UiCmd::SetVolume(v));
+                }
+                5 => self.send(UiCmd::ToggleMute),
+                6 => self.send(UiCmd::Restart),
                 7 => {
-                    if let Some(p) = self.active_file.clone() {
-                        self.toggle_lock_for_path(&p);
+                    if let Some(p) = self.snap.active_file.clone() {
+                        self.send(UiCmd::ToggleLockDefault(p));
                     }
                 }
                 8 => self.toggle_notch_mode(ctx),
                 9 => {
-                    self.pinned = !self.pinned;
-                    self.save_settings();
-                    self.sync_tray();
+                    self.snap.pinned = !self.snap.pinned;
+                    self.send(UiCmd::SetPinned(self.snap.pinned));
                 }
-                10 => self.cycle_timer(),
+                10 => self.send(UiCmd::CycleTimer),
                 11 => {
                     self.drawer_open = !self.drawer_open;
                     self.apply_window_geometry(ctx);
@@ -1004,80 +461,20 @@ impl ZenhushApp {
                     if self.drawer_open {
                         self.drawer_open = false;
                         self.apply_window_geometry(ctx);
-                    } else if !self.pinned {
-                        self.hide_window(ctx);
+                    } else if !self.snap.pinned && self.snap.has_tray {
+                        self.close_popup(ctx);
                     }
                 }
                 n if n >= 100 => {
                     let idx = (n - 100) as usize;
                     if idx < Sound::ALL.len() {
-                        self.select_live_sound(Sound::ALL[idx]);
-                    } else if idx == Sound::ALL.len() && self.active_file.is_some() {
-                        self.select_file_mode();
+                        self.send(UiCmd::SelectSound(Sound::ALL[idx]));
+                    } else if idx == Sound::ALL.len() && self.snap.active_file.is_some() {
+                        self.send(UiCmd::SelectFileMode);
                     }
                 }
                 _ => {}
             }
-        }
-    }
-
-    fn tick(&mut self) {
-        let now = Instant::now();
-        let dt = now.duration_since(self.last_tick);
-        self.last_tick = now;
-
-        if let Some(until) = self.notice_until {
-            if now >= until {
-                self.notice = None;
-                self.notice_until = None;
-            }
-        }
-
-        if self.playing {
-            self.elapsed += dt;
-            if let Some(end) = self.timer_end {
-                if now >= end {
-                    self.timer_remaining = None;
-                    self.timer_end = None;
-                    self.timer_minutes = 0;
-                    self.audio.pause();
-                    self.audio.set_master_fade(1.0);
-                    self.playing = false;
-                    self.save_settings();
-                    self.sync_tray();
-                } else {
-                    let rem = end.duration_since(now);
-                    self.timer_remaining = Some(rem);
-                    // Gentle 3-second fade-out before sleep timer stops
-                    let secs_left = rem.as_secs_f32();
-                    if secs_left <= 3.0 {
-                        self.audio.set_master_fade((secs_left / 3.0).clamp(0.0, 1.0));
-                    }
-                }
-            }
-        }
-
-        for v in self.audio.drain_rms() {
-            if self.rms_history.len() == 64 {
-                self.rms_history.pop_front();
-            }
-            self.rms_history.push_back(v);
-        }
-
-        if self.playing && !self.reduce_motion && !self.rms_history.is_empty() {
-            let len = self.rms_history.len();
-            let mut loudest = 0;
-            let mut loudest_v = -1.0f32;
-            for i in 0..BAR_COUNT {
-                let idx = len.saturating_sub(BAR_COUNT - i);
-                let target = self.rms_history.get(idx).copied().unwrap_or(0.14);
-                self.bar_heights[i] += (target - self.bar_heights[i]) * 0.42;
-                if self.bar_heights[i] > loudest_v {
-                    loudest_v = self.bar_heights[i];
-                    loudest = i;
-                }
-            }
-            self.bar_accent = loudest;
         }
     }
 
@@ -1094,9 +491,34 @@ impl ZenhushApp {
             }
         });
         if let Some(path) = dropped {
-            self.add_or_select_local_file(path, true, false);
+            self.send(UiCmd::AddLocalFile {
+                path,
+                play_now: true,
+                lock_default: false,
+            });
         }
         hovering_file
+    }
+
+    fn bar_height_at(&self, i: usize) -> f32 {
+        self.snap
+            .rms_bars
+            .get(i)
+            .copied()
+            .unwrap_or_else(|| IDLE_BARS[i % BAR_COUNT])
+    }
+
+    fn loudest_bar(&self) -> usize {
+        let mut best = 0;
+        let mut best_v = -1.0f32;
+        for i in 0..BAR_COUNT {
+            let v = self.bar_height_at(i);
+            if v > best_v {
+                best_v = v;
+                best = i;
+            }
+        }
+        best
     }
 
     fn render_notch_pill(&mut self, ctx: &egui::Context, theme: Theme) {
@@ -1107,32 +529,33 @@ impl ZenhushApp {
             .inner_margin(egui::Margin::symmetric(10, 6));
 
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
-            // Scroll wheel anywhere on the notch pill adjusts volume!
             let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > 1.5 && ui.rect_contains_pointer(ui.max_rect()) {
                 let step = if scroll > 0.0 { 3i16 } else { -3i16 };
-                let next = (self.audio.volume() as i16 + step).clamp(0, 100) as u8;
-                self.set_volume(next);
+                let next = (self.snap.volume as i16 + step).clamp(0, 100) as u8;
+                self.snap.volume = next;
+                self.send(UiCmd::SetVolume(next));
             }
 
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(7.0, 0.0);
 
-                // Mini 6-bar EQ
                 let (eq_rect, eq_resp) =
-                    ui.allocate_exact_size(Vec2::new(34.0, 20.0), Sense::click());
+                    ui.allocate_exact_size(Vec2::new(34.0, 20.0), Sense::click_and_drag());
                 if eq_resp.drag_started() {
-                    self.dock_anchor = DockAnchor::Free;
+                    self.snap.dock_anchor = DockAnchor::Free;
+                    self.send(UiCmd::SetDockAnchor(DockAnchor::Free));
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
                 let p = ui.painter_at(eq_rect);
+                let accent_slot = (self.loudest_bar() / 3).min(5);
                 for i in 0..6 {
-                    let h = (self.bar_heights[i * 3] * 18.0).max(3.0);
+                    let h = (self.bar_height_at(i * 3) * 18.0).max(3.0);
                     let x = eq_rect.min.x + i as f32 * 5.6 + 1.0;
                     let y = eq_rect.center().y - h * 0.5;
-                    let c = if self.playing && i == (self.bar_accent / 3).min(5) {
+                    let c = if self.snap.playing && i == accent_slot {
                         theme.accent
-                    } else if self.playing {
+                    } else if self.snap.playing {
                         theme.bar_strong
                     } else {
                         theme.bar
@@ -1144,13 +567,12 @@ impl ZenhushApp {
                     );
                 }
 
-                // Title / Timer (draggable too)
-                let label_text = if let Some(rem) = self.timer_remaining {
-                    if self.playing && rem.as_secs() > 0 {
+                let label_text = if let Some(rem) = self.snap.timer_remaining_secs {
+                    if self.snap.playing && rem > 0 {
                         format!(
                             "{} • {}",
                             truncate_chars(&self.display_title(), 12),
-                            format_duration(rem.as_secs())
+                            format_duration(rem)
                         )
                     } else {
                         truncate_chars(&self.display_title(), 16)
@@ -1163,7 +585,8 @@ impl ZenhushApp {
                 let (title_rect, title_resp) =
                     ui.allocate_exact_size(Vec2::new(title_w, 24.0), Sense::click_and_drag());
                 if title_resp.drag_started() {
-                    self.dock_anchor = DockAnchor::Free;
+                    self.snap.dock_anchor = DockAnchor::Free;
+                    self.send(UiCmd::SetDockAnchor(DockAnchor::Free));
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 } else if title_resp.clicked() {
                     self.toggle_notch_mode(ctx);
@@ -1176,7 +599,6 @@ impl ZenhushApp {
                     theme.text,
                 );
 
-                // Mini play/pause button
                 let (play_rect, play_resp) =
                     ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
                 let pp = ui.painter_at(play_rect);
@@ -1189,13 +611,13 @@ impl ZenhushApp {
                         theme.accent
                     },
                 );
-                let glyph = if self.playing {
+                let glyph = if self.snap.playing {
                     IconKind::Pause
                 } else {
                     IconKind::Play
                 };
                 if let Some(tex) = self.icons.texture(ctx, glyph, theme.on_accent, 13) {
-                    let nudge = if self.playing { 0.0 } else { 1.0 };
+                    let nudge = if self.snap.playing { 0.0 } else { 1.0 };
                     pp.image(
                         tex.id(),
                         Rect::from_center_size(
@@ -1207,13 +629,16 @@ impl ZenhushApp {
                     );
                 }
                 if play_resp
-                    .on_hover_text(if self.playing { "Pause (Space)" } else { "Play (Space)" })
+                    .on_hover_text(if self.snap.playing {
+                        "Pause (Space)"
+                    } else {
+                        "Play (Space)"
+                    })
                     .clicked()
                 {
-                    self.toggle_play();
+                    self.send(UiCmd::TogglePlay);
                 }
 
-                // Expand to card
                 if icon_button(
                     ui,
                     &mut self.icons,
@@ -1247,17 +672,17 @@ impl ZenhushApp {
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             ui.spacing_mut().item_spacing = Vec2::ZERO;
 
-            // --- 1. Top Micro-Bar (Draggable + Pin + Notch + Hide) ---
+            // --- 1. Top Micro-Bar ---
             ui.horizontal(|ui| {
                 ui.set_height(24.0);
-                let brand_color = if self.playing {
+                let brand_color = if self.snap.playing {
                     theme.accent_text
                 } else {
                     theme.subtext
                 };
                 let pill_text = if self.is_current_locked_default() {
                     "ZENHUSH • LOCKED"
-                } else if self.playing {
+                } else if self.snap.playing {
                     "ZENHUSH • ACTIVE"
                 } else {
                     "ZENHUSH"
@@ -1267,7 +692,8 @@ impl ZenhushApp {
                 let (drag_rect, drag_resp) =
                     ui.allocate_exact_size(Vec2::new(drag_w, 22.0), Sense::click_and_drag());
                 if drag_resp.drag_started() {
-                    self.dock_anchor = DockAnchor::Free;
+                    self.snap.dock_anchor = DockAnchor::Free;
+                    self.send(UiCmd::SetDockAnchor(DockAnchor::Free));
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
                 ui.painter_at(drag_rect).text(
@@ -1280,7 +706,7 @@ impl ZenhushApp {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
-                    if self.tray.is_some()
+                    if self.snap.has_tray
                         && icon_button(
                             ui,
                             &mut self.icons,
@@ -1292,7 +718,7 @@ impl ZenhushApp {
                             "Hide to top bar (Esc)",
                         )
                     {
-                        self.hide_window(ctx);
+                        self.close_popup(ctx);
                     }
                     if icon_button(
                         ui,
@@ -1312,32 +738,31 @@ impl ZenhushApp {
                         IconKind::Pin,
                         22.0,
                         13,
-                        if self.pinned {
+                        if self.snap.pinned {
                             theme.accent_text
                         } else {
                             theme.subtext
                         },
                         theme,
-                        if self.pinned {
+                        if self.snap.pinned {
                             "Pinned open (P)"
                         } else {
                             "Pin open (P)"
                         },
                     ) {
-                        self.pinned = !self.pinned;
-                        self.save_settings();
-                        self.sync_tray();
+                        self.snap.pinned = !self.snap.pinned;
+                        self.send(UiCmd::SetPinned(self.snap.pinned));
                     }
                 });
             });
 
             ui.add_space(6.0);
 
-            // --- 2. Visualizer Card (92px, 18 smooth bars, drop target) ---
+            // --- 2. Visualizer Card ---
             let eq_w = ui.available_width();
             let (eq_rect, eq_resp) = ui.allocate_exact_size(Vec2::new(eq_w, 92.0), Sense::click());
             if eq_resp.double_clicked() {
-                self.toggle_play();
+                self.send(UiCmd::TogglePlay);
             }
             let p = ui.painter_at(eq_rect);
             p.rect_filled(eq_rect, CornerRadius::same(12), theme.inset);
@@ -1357,14 +782,16 @@ impl ZenhushApp {
                 let bar_h = eq_rect.height() - top - bottom - 6.0;
                 let slot = (eq_rect.width() - 2.0 * margin) / BAR_COUNT as f32;
                 let bw = (slot * 0.56).max(3.0);
+                let loudest = self.loudest_bar();
 
                 for i in 0..BAR_COUNT {
-                    let h = (self.bar_heights[i] * bar_h).max(3.0);
+                    let v = self.bar_height_at(i);
+                    let h = (v * bar_h).max(3.0);
                     let x = eq_rect.min.x + margin + i as f32 * slot + (slot - bw) * 0.5;
                     let y = eq_rect.min.y + top + bar_h - h;
-                    let color = if i == self.bar_accent && self.playing {
+                    let color = if i == loudest && self.snap.playing {
                         theme.accent
-                    } else if self.bar_heights[i] > 0.62 {
+                    } else if v > 0.62 {
                         theme.bar_strong
                     } else {
                         theme.bar
@@ -1376,26 +803,23 @@ impl ZenhushApp {
                     );
                 }
 
-                // Bottom-left: elapsed; bottom-right: status/countdown
                 p.text(
                     Pos2::new(eq_rect.min.x + margin, eq_rect.max.y - 8.0),
                     egui::Align2::LEFT_BOTTOM,
-                    format_duration(self.elapsed.as_secs()),
+                    format_duration(self.snap.elapsed_secs),
                     egui::FontId::proportional(11.5),
                     theme.subtext,
                 );
-                let badge = self.status_badge();
                 p.text(
                     Pos2::new(eq_rect.max.x - margin, eq_rect.max.y - 8.0),
                     egui::Align2::RIGHT_BOTTOM,
-                    badge,
+                    self.status_badge(),
                     semibold_font(11.5),
                     theme.accent_text,
                 );
             }
 
-            // Missing locked file recovery or transient notice
-            if let Some(missing) = self.missing_locked_file.clone() {
+            if let Some(missing) = self.snap.missing_locked_file.clone() {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.label(
@@ -1422,11 +846,7 @@ impl ZenhushApp {
                             )
                             .clicked()
                         {
-                            self.locked_default_file = None;
-                            self.missing_locked_file = None;
-                            self.is_file_mode = false;
-                            self.notice = None;
-                            self.save_settings();
+                            self.send(UiCmd::UnlockMissingDefault);
                         }
                         if ui
                             .add(
@@ -1443,7 +863,7 @@ impl ZenhushApp {
                         }
                     });
                 });
-            } else if let Some((msg, is_err)) = &self.notice {
+            } else if let Some((msg, is_err)) = &self.snap.notice {
                 ui.add_space(6.0);
                 ui.label(
                     RichText::new(msg)
@@ -1458,7 +878,7 @@ impl ZenhushApp {
 
             ui.add_space(10.0);
 
-            // --- 3. Sound Header (< Title + Subtitle >) ---
+            // --- 3. Sound Header ---
             ui.horizontal(|ui| {
                 if icon_button(
                     ui,
@@ -1470,7 +890,7 @@ impl ZenhushApp {
                     theme,
                     "Previous sound (Left)",
                 ) {
-                    self.step_sound(-1);
+                    self.send(UiCmd::StepSound(-1));
                 }
 
                 let mid_w = (ui.available_width() - 34.0).max(20.0);
@@ -1502,41 +922,44 @@ impl ZenhushApp {
                     theme,
                     "Next sound (Right)",
                 ) {
-                    self.step_sound(1);
+                    self.send(UiCmd::StepSound(1));
                 }
             });
 
             ui.add_space(8.0);
 
-            // --- 4. Quick-Jump Sound Pills (1-click switching!) ---
+            // --- 4. Quick Sound Chips ---
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
                 for &sound in &Sound::ALL {
-                    let selected = !self.is_file_mode && self.current_sound() == sound;
+                    let selected = !self.snap.is_file_mode && self.snap.active_sound == sound;
                     if pill_chip(ui, sound.short_label(), selected, theme) {
-                        self.select_live_sound(sound);
+                        self.snap.active_sound = sound;
+                        self.snap.is_file_mode = false;
+                        self.send(UiCmd::SelectSound(sound));
                     }
                 }
-                let file_chip_label = if self.locked_default_file.is_some() {
+                let file_chip_label = if self.snap.locked_default_file.is_some() {
                     "🔒 File"
                 } else {
                     "File"
                 };
-                if pill_chip(ui, file_chip_label, self.is_file_mode, theme) {
-                    if self.active_file.is_none() && self.local_tracks.is_empty() {
+                if pill_chip(ui, file_chip_label, self.snap.is_file_mode, theme) {
+                    if self.snap.active_file.is_none() && self.snap.local_tracks.is_empty() {
                         self.drawer_open = true;
                         self.drawer_tab = DrawerTab::Files;
                         self.apply_window_geometry(ctx);
                         self.pick_local_file(false);
                     } else {
-                        self.select_file_mode();
+                        self.snap.is_file_mode = true;
+                        self.send(UiCmd::SelectFileMode);
                     }
                 }
             });
 
             ui.add_space(10.0);
 
-            // --- 5. Hero Transport Row ---
+            // --- 5. Transport Row ---
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(14.0, 0.0);
                 let row_w = 34.0 + 14.0 + 54.0 + 14.0 + 58.0 + 14.0 + 34.0;
@@ -1552,10 +975,9 @@ impl ZenhushApp {
                     theme,
                     "Restart (R)",
                 ) {
-                    self.restart_playback();
+                    self.send(UiCmd::Restart);
                 }
 
-                // Play/Pause hero circle (54px)
                 let (play_rect, play_resp) =
                     ui.allocate_exact_size(Vec2::splat(54.0), Sense::click());
                 let pp = ui.painter_at(play_rect);
@@ -1566,15 +988,19 @@ impl ZenhushApp {
                 };
                 pp.circle_filled(play_rect.center(), 26.5, fill);
                 if play_resp.has_focus() {
-                    pp.circle_stroke(play_rect.center(), 24.5, Stroke::new(2.0_f32, theme.accent_text));
+                    pp.circle_stroke(
+                        play_rect.center(),
+                        24.5,
+                        Stroke::new(2.0_f32, theme.accent_text),
+                    );
                 }
-                let glyph = if self.playing {
+                let glyph = if self.snap.playing {
                     IconKind::Pause
                 } else {
                     IconKind::Play
                 };
                 if let Some(tex) = self.icons.texture(ctx, glyph, theme.on_accent, 22) {
-                    let nudge = if self.playing { 0.0 } else { 1.5 };
+                    let nudge = if self.snap.playing { 0.0 } else { 1.5 };
                     pp.image(
                         tex.id(),
                         Rect::from_center_size(
@@ -1586,23 +1012,23 @@ impl ZenhushApp {
                     );
                 }
                 if play_resp
-                    .on_hover_text(if self.playing {
+                    .on_hover_text(if self.snap.playing {
                         "Pause (Space)"
                     } else {
                         "Play (Space)"
                     })
                     .clicked()
                 {
-                    self.toggle_play();
+                    self.snap.playing = !self.snap.playing;
+                    self.send(UiCmd::TogglePlay);
                 }
 
-                // Quick Timer Cycle Pill
-                let timer_txt = if self.timer_minutes == 0 {
+                let timer_txt = if self.snap.timer_minutes == 0 {
                     "Timer".to_string()
                 } else {
-                    format!("{}m", self.timer_minutes)
+                    format!("{}m", self.snap.timer_minutes)
                 };
-                let active_timer = self.timer_minutes > 0;
+                let active_timer = self.snap.timer_minutes > 0;
                 if ui
                     .add(
                         egui::Button::new(
@@ -1623,10 +1049,9 @@ impl ZenhushApp {
                     .on_hover_text("Cycle sleep/focus timer (T)")
                     .clicked()
                 {
-                    self.cycle_timer();
+                    self.send(UiCmd::CycleTimer);
                 }
 
-                // Drawer Toggle
                 if icon_button(
                     ui,
                     &mut self.icons,
@@ -1648,57 +1073,64 @@ impl ZenhushApp {
 
             ui.add_space(10.0);
 
-            // --- 6. Always-Visible Volume + Quick Lock Strip ---
+            // --- 6. Volume + Quick Lock Strip ---
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(6.0, 0.0);
-                let muted = self.audio.is_muted();
+                let muted = self.snap.muted;
                 if icon_button(
                     ui,
                     &mut self.icons,
-                    if muted || self.audio.volume() == 0 {
+                    if muted || self.snap.volume == 0 {
                         IconKind::Mute
                     } else {
                         IconKind::Volume
                     },
                     26.0,
                     16,
-                    if muted { theme.accent_text } else { theme.subtext },
+                    if muted {
+                        theme.accent_text
+                    } else {
+                        theme.subtext
+                    },
                     theme,
                     "Mute / Unmute (M)",
                 ) {
-                    self.toggle_mute();
+                    self.snap.muted = !self.snap.muted;
+                    self.send(UiCmd::ToggleMute);
                 }
 
-                let lock_btn_w = if self.is_file_mode && self.active_file.is_some() {
+                let lock_btn_w = if self.snap.is_file_mode && self.snap.active_file.is_some() {
                     30.0
                 } else {
                     0.0
                 };
                 let slider_w = (ui.available_width() - 36.0 - lock_btn_w).max(60.0);
-                let mut vol_val = self.audio.volume() as f32;
+                let mut vol_val = self.snap.volume as f32;
                 let resp = ui.add_sized(
                     [slider_w, 20.0],
                     egui::Slider::new(&mut vol_val, 0.0..=100.0)
                         .show_value(false)
                         .trailing_fill(true),
                 );
-                // Scroll wheel on volume slider
                 if resp.hovered() {
                     let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
                     if scroll.abs() > 1.0 {
                         let step = if scroll > 0.0 { 3.0 } else { -3.0 };
-                        vol_val = (vol_val + step).clamp(0.0, 100.0);
-                        self.set_volume(vol_val as u8);
+                        let next = (vol_val + step).clamp(0.0, 100.0) as u8;
+                        self.snap.volume = next;
+                        self.send(UiCmd::SetVolume(next));
                     }
                 }
                 if resp.changed() {
-                    self.set_volume(vol_val as u8);
+                    let next = vol_val as u8;
+                    self.snap.volume = next;
+                    self.send(UiCmd::SetVolume(next));
                 }
 
                 let vol_txt = if muted {
                     "Mute".to_string()
                 } else {
-                    format!("{}%", self.audio.volume())
+                    format!("{}%", self.snap.volume)
                 };
                 ui.allocate_ui_with_layout(
                     Vec2::new(30.0, 20.0),
@@ -1708,17 +1140,24 @@ impl ZenhushApp {
                     },
                 );
 
-                // Quick Lock-as-Default button right on the main bar when a file is selected!
-                if self.is_file_mode {
-                    if let Some(path) = self.active_file.clone() {
-                        let locked = self.locked_default_file.as_ref() == Some(&path);
+                if self.snap.is_file_mode {
+                    if let Some(path) = self.snap.active_file.clone() {
+                        let locked = self.snap.locked_default_file.as_ref() == Some(&path);
                         if icon_button(
                             ui,
                             &mut self.icons,
-                            if locked { IconKind::Lock } else { IconKind::Unlock },
+                            if locked {
+                                IconKind::Lock
+                            } else {
+                                IconKind::Unlock
+                            },
                             26.0,
                             15,
-                            if locked { theme.accent_text } else { theme.subtext },
+                            if locked {
+                                theme.accent_text
+                            } else {
+                                theme.subtext
+                            },
                             theme,
                             if locked {
                                 "Locked as default audio (L to unlock)"
@@ -1726,14 +1165,13 @@ impl ZenhushApp {
                                 "Lock this file as default audio (L)"
                             },
                         ) {
-                            self.toggle_lock_for_path(&path);
+                            self.send(UiCmd::ToggleLockDefault(path));
                         }
                     }
                 }
             });
 
-            // --- Quit link when no system tray is available ---
-            if self.tray.is_none() && !self.drawer_open {
+            if !self.snap.has_tray && !self.drawer_open {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.add_space((ui.available_width() - 90.0).max(0.0) * 0.5);
@@ -1749,7 +1187,8 @@ impl ZenhushApp {
                         )
                         .clicked()
                     {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        self.send(UiCmd::QuitDaemon);
+                        self.close_popup(ctx);
                     }
                 });
             }
@@ -1760,13 +1199,15 @@ impl ZenhushApp {
                 ui.painter().line_segment(
                     [
                         Pos2::new(ui.min_rect().min.x, ui.cursor().min.y),
-                        Pos2::new(ui.min_rect().min.x + ui.available_width(), ui.cursor().min.y),
+                        Pos2::new(
+                            ui.min_rect().min.x + ui.available_width(),
+                            ui.cursor().min.y,
+                        ),
                     ],
                     Stroke::new(1.0_f32, theme.edge),
                 );
                 ui.add_space(8.0);
 
-                // Tab selector row
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::new(6.0, 0.0);
                     let tab_w = (ui.available_width() - 12.0) / 3.0;
@@ -1841,7 +1282,6 @@ impl ZenhushApp {
             }
         });
 
-        // Saved tracks list
         let mut play_path: Option<PathBuf> = None;
         let mut lock_path: Option<PathBuf> = None;
         let mut remove_path: Option<PathBuf> = None;
@@ -1850,17 +1290,19 @@ impl ZenhushApp {
             .max_height(104.0)
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
-                if self.local_tracks.is_empty() {
+                if self.snap.local_tracks.is_empty() {
                     ui.label(
-                        RichText::new("No local tracks yet — add or drop wav, mp3, flac, ogg, m4a")
-                            .size(11.5)
-                            .color(theme.subtext),
+                        RichText::new(
+                            "No local tracks yet — add or drop wav, mp3, flac, ogg, m4a",
+                        )
+                        .size(11.5)
+                        .color(theme.subtext),
                     );
                 }
-                for track in &self.local_tracks {
-                    let is_active =
-                        self.is_file_mode && self.active_file.as_ref() == Some(&track.path);
-                    let is_locked = self.locked_default_file.as_ref() == Some(&track.path);
+                for track in &self.snap.local_tracks {
+                    let is_active = self.snap.is_file_mode
+                        && self.snap.active_file.as_ref() == Some(&track.path);
+                    let is_locked = self.snap.locked_default_file.as_ref() == Some(&track.path);
                     let row_bg = if is_active {
                         theme.accent_soft
                     } else {
@@ -1941,53 +1383,39 @@ impl ZenhushApp {
             });
 
         if let Some(p) = play_path {
-            self.add_or_select_local_file(p, true, false);
+            self.send(UiCmd::AddLocalFile {
+                path: p,
+                play_now: true,
+                lock_default: false,
+            });
         }
         if let Some(p) = lock_path {
-            self.toggle_lock_for_path(&p);
+            self.send(UiCmd::ToggleLockDefault(p));
         }
         if let Some(p) = remove_path {
-            self.local_tracks.retain(|t| t.path != p);
-            if self.locked_default_file.as_ref() == Some(&p) {
-                self.locked_default_file = None;
-            }
-            if self.active_file.as_ref() == Some(&p) {
-                self.active_file = self.local_tracks.first().map(|t| t.path.clone());
-                if self.active_file.is_none() {
-                    self.is_file_mode = false;
-                    if self.playing {
-                        self.play_selected();
-                    }
-                }
-            }
-            self.save_settings();
-            self.sync_tray();
+            self.send(UiCmd::RemoveLocalTrack(p));
         }
 
-        // File Clarity EQ + Loop Seam
         ui.horizontal(|ui| {
             ui.label(RichText::new("Tone").size(12.0).color(theme.subtext));
             ui.add_space(6.0);
             for tone in FileTone::ALL {
-                if pill_chip(ui, tone.label(), self.file_tone == tone, theme) {
-                    self.file_tone = tone;
-                    self.audio.set_file_tone(tone);
-                    self.save_settings();
+                if pill_chip(ui, tone.label(), self.snap.file_tone == tone, theme) {
+                    self.snap.file_tone = tone;
+                    self.send(UiCmd::SetFileTone(tone));
                 }
             }
         });
         ui.horizontal(|ui| {
             ui.label(RichText::new("Loop seam").size(12.0).color(theme.subtext));
             ui.add_space(6.0);
-            if pill_chip(ui, "Crossfade", self.loop_crossfade, theme) {
-                self.loop_crossfade = true;
-                self.audio.set_crossfade(true);
-                self.save_settings();
+            if pill_chip(ui, "Crossfade", self.snap.loop_crossfade, theme) {
+                self.snap.loop_crossfade = true;
+                self.send(UiCmd::SetLoopCrossfade(true));
             }
-            if pill_chip(ui, "Gapless", !self.loop_crossfade, theme) {
-                self.loop_crossfade = false;
-                self.audio.set_crossfade(false);
-                self.save_settings();
+            if pill_chip(ui, "Gapless", !self.snap.loop_crossfade, theme) {
+                self.snap.loop_crossfade = false;
+                self.send(UiCmd::SetLoopCrossfade(false));
             }
         });
     }
@@ -2011,12 +1439,12 @@ impl ZenhushApp {
                     )
                     .clicked()
                 {
-                    self.reset_sound_controls();
+                    self.send(UiCmd::ResetControls);
                 }
             });
         });
 
-        let mut dep = self.audio.depth() as f32;
+        let mut dep = self.snap.depth as f32;
         ui.horizontal(|ui| {
             ui.allocate_ui(Vec2::new(52.0, 18.0), |ui| {
                 ui.label(RichText::new("Depth").size(12.5).color(theme.subtext));
@@ -2032,17 +1460,18 @@ impl ZenhushApp {
                 .on_hover_text("Higher cuts bright frequencies for warmer focus")
                 .changed()
             {
-                self.audio.set_depth(dep as u8);
-                self.save_settings();
+                let v = dep as u8;
+                self.snap.depth = v;
+                self.send(UiCmd::SetDepth(v));
             }
             ui.label(
-                RichText::new(format!("{}", self.audio.depth()))
+                RichText::new(format!("{}", self.snap.depth))
                     .size(12.0)
                     .color(theme.subtext),
             );
         });
 
-        let mut rum = self.audio.rumble() as f32;
+        let mut rum = self.snap.rumble as f32;
         ui.horizontal(|ui| {
             ui.allocate_ui(Vec2::new(52.0, 18.0), |ui| {
                 ui.label(RichText::new("Rumble").size(12.5).color(theme.subtext));
@@ -2058,17 +1487,17 @@ impl ZenhushApp {
                 .on_hover_text("Sub-bass warmth boost")
                 .changed()
             {
-                self.audio.set_rumble(rum as u8);
-                self.save_settings();
+                let v = rum as u8;
+                self.snap.rumble = v;
+                self.send(UiCmd::SetRumble(v));
             }
             ui.label(
-                RichText::new(format!("{}", self.audio.rumble()))
+                RichText::new(format!("{}", self.snap.rumble))
                     .size(12.0)
                     .color(theme.subtext),
             );
         });
 
-        // Atmosphere Layer
         ui.add_space(2.0);
         ui.label(
             RichText::new("ATMOSPHERE LAYER")
@@ -2077,21 +1506,19 @@ impl ZenhushApp {
         );
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
-            if pill_chip(ui, "Off", self.layer_sound.is_none(), theme) {
-                self.layer_sound = None;
-                self.audio.set_layer(None);
-                self.save_settings();
+            if pill_chip(ui, "Off", self.snap.layer_sound.is_none(), theme) {
+                self.snap.layer_sound = None;
+                self.send(UiCmd::SetLayer(None));
             }
             for &ls in &Sound::ATMOSPHERE_LAYERS {
-                if pill_chip(ui, ls.short_label(), self.layer_sound == Some(ls), theme) {
-                    self.layer_sound = Some(ls);
-                    self.audio.set_layer(Some(ls));
-                    self.save_settings();
+                if pill_chip(ui, ls.short_label(), self.snap.layer_sound == Some(ls), theme) {
+                    self.snap.layer_sound = Some(ls);
+                    self.send(UiCmd::SetLayer(Some(ls)));
                 }
             }
         });
-        if self.layer_sound.is_some() {
-            let mut mix = self.layer_mix as f32;
+        if self.snap.layer_sound.is_some() {
+            let mut mix = self.snap.layer_mix as f32;
             ui.horizontal(|ui| {
                 ui.allocate_ui(Vec2::new(52.0, 18.0), |ui| {
                     ui.label(RichText::new("Blend").size(12.5).color(theme.subtext));
@@ -2106,19 +1533,18 @@ impl ZenhushApp {
                     )
                     .changed()
                 {
-                    self.layer_mix = mix as u8;
-                    self.audio.set_layer_mix(self.layer_mix);
-                    self.save_settings();
+                    let v = mix as u8;
+                    self.snap.layer_mix = v;
+                    self.send(UiCmd::SetLayerMix(v));
                 }
                 ui.label(
-                    RichText::new(format!("{}%", self.layer_mix))
+                    RichText::new(format!("{}%", self.snap.layer_mix))
                         .size(12.0)
                         .color(theme.subtext),
                 );
             });
         }
 
-        // Sleep / Focus Timer
         ui.add_space(2.0);
         ui.label(
             RichText::new("FOCUS / SLEEP TIMER (FADES OUT)")
@@ -2128,27 +1554,26 @@ impl ZenhushApp {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
             for (mins, lbl) in TIMER_CHOICES {
-                if pill_chip(ui, lbl, self.timer_minutes == mins, theme) {
-                    self.timer_minutes = mins;
-                    self.arm_timer();
-                    self.save_settings();
+                if pill_chip(ui, lbl, self.snap.timer_minutes == mins, theme) {
+                    self.snap.timer_minutes = mins;
+                    self.send(UiCmd::SetTimer(mins));
                 }
             }
         });
     }
 
     fn render_tab_barkeys(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, theme: Theme) {
-        ui.spacing_mut().item_spacing = Vec2::new(6.0, 7.0);
+        ui.spacing_mut().item_spacing = Vec2::new(5.0, 6.0);
 
         ui.horizontal(|ui| {
             ui.label(RichText::new("Dock").size(12.0).color(theme.subtext));
             ui.add_space(4.0);
             for anchor in DockAnchor::ALL {
-                if pill_chip(ui, anchor.label(), self.dock_anchor == anchor, theme) {
-                    self.dock_anchor = anchor;
+                if pill_chip(ui, anchor.label(), self.snap.dock_anchor == anchor, theme) {
+                    self.snap.dock_anchor = anchor;
                     self.anchor_applied = false;
                     self.apply_window_geometry(ctx);
-                    self.save_settings();
+                    self.send(UiCmd::SetDockAnchor(anchor));
                 }
             }
         });
@@ -2157,47 +1582,43 @@ impl ZenhushApp {
             ui.label(RichText::new("Theme").size(12.0).color(theme.subtext));
             ui.add_space(4.0);
             for mode in ThemeMode::ALL {
-                if pill_chip(ui, mode.label(), self.theme_mode == mode, theme) {
-                    self.theme_mode = mode;
-                    self.save_settings();
+                if pill_chip(ui, mode.label(), self.snap.theme_mode == mode, theme) {
+                    self.snap.theme_mode = mode;
+                    self.send(UiCmd::SetTheme(mode));
                 }
             }
         });
 
         ui.horizontal(|ui| {
-            if pill_chip(ui, "Auto-play on launch", self.auto_play_on_launch, theme) {
-                self.auto_play_on_launch = !self.auto_play_on_launch;
-                self.save_settings();
+            if pill_chip(
+                ui,
+                "Auto-play on launch",
+                self.snap.auto_play_on_launch,
+                theme,
+            ) {
+                let v = !self.snap.auto_play_on_launch;
+                self.snap.auto_play_on_launch = v;
+                self.send(UiCmd::SetAutoPlay(v));
             }
-            if pill_chip(ui, "Start in tray", self.start_in_background, theme) {
-                self.start_in_background = !self.start_in_background;
-                self.save_settings();
+            if pill_chip(ui, "Start in tray", self.snap.start_in_background, theme) {
+                let v = !self.snap.start_in_background;
+                self.snap.start_in_background = v;
+                self.send(UiCmd::SetStartInBackground(v));
             }
-            if pill_chip(ui, "Reduce motion", self.reduce_motion, theme) {
-                self.reduce_motion = !self.reduce_motion;
-                self.save_settings();
+            if pill_chip(ui, "Reduce motion", self.snap.reduce_motion, theme) {
+                let v = !self.snap.reduce_motion;
+                self.snap.reduce_motion = v;
+                self.send(UiCmd::SetReduceMotion(v));
             }
         });
 
         #[cfg(target_os = "linux")]
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
-            if pill_chip(ui, "Launch at login", self.autostart_enabled, theme) {
-                let target = !self.autostart_enabled;
-                match shortcuts::set_autostart(target) {
-                    Ok(()) => {
-                        self.autostart_enabled = target;
-                        self.set_notice(
-                            if target {
-                                "Autostart enabled (starts in top bar)"
-                            } else {
-                                "Autostart removed"
-                            },
-                            false,
-                        );
-                    }
-                    Err(e) => self.set_notice(e, true),
-                }
+            if pill_chip(ui, "Launch at login", self.snap.autostart_enabled, theme) {
+                let v = !self.snap.autostart_enabled;
+                self.snap.autostart_enabled = v;
+                self.send(UiCmd::SetAutostart(v));
             }
             if ui
                 .add(
@@ -2212,13 +1633,18 @@ impl ZenhushApp {
                 .on_hover_text("Install zenhush to ~/.local/bin and your Linux App Launcher")
                 .clicked()
             {
-                match shortcuts::install_to_user_local() {
-                    Ok(_) => self.set_notice("Installed to ~/.local/bin & App Launcher", false),
-                    Err(e) => self.set_notice(e, true),
-                }
+                self.send(UiCmd::InstallLauncher);
             }
-            if shortcuts::is_gnome()
-                && ui
+            if shortcuts::is_gnome() {
+                let pill_lbl = if self.snap.gnome_pill_installed {
+                    "GNOME Pill ✓"
+                } else {
+                    "Install GNOME Pill"
+                };
+                if pill_chip(ui, pill_lbl, self.snap.gnome_pill_installed, theme) {
+                    self.send(UiCmd::ToggleGnomePill);
+                }
+                if ui
                     .add(
                         egui::Button::new(
                             RichText::new("Bind GNOME Shortcut")
@@ -2230,19 +1656,8 @@ impl ZenhushApp {
                     )
                     .on_hover_text("Registers toggle & play/pause shortcuts in GNOME")
                     .clicked()
-            {
-                match shortcuts::register_gnome_shortcuts(
-                    &self.global_shortcut_toggle,
-                    &self.global_shortcut_play,
-                ) {
-                    Ok(()) => self.set_notice(
-                        format!(
-                            "GNOME bound: {} & {}",
-                            self.global_shortcut_toggle, self.global_shortcut_play
-                        ),
-                        false,
-                    ),
-                    Err(e) => self.set_notice(e, true),
+                {
+                    self.send(UiCmd::BindGnomeShortcut);
                 }
             }
         });
@@ -2250,11 +1665,14 @@ impl ZenhushApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Hotkey").size(11.5).color(theme.subtext));
             for preset in ["Alt+Shift+Z", "Ctrl+Shift+Z", "Super+Shift+Z"] {
-                if pill_chip(ui, preset, self.global_shortcut_toggle == preset, theme) {
-                    self.global_shortcut_toggle = preset.to_string();
-                    self.shortcuts
-                        .apply(&self.global_shortcut_toggle, &self.global_shortcut_play);
-                    self.save_settings();
+                if pill_chip(
+                    ui,
+                    preset,
+                    self.snap.global_shortcut_toggle == preset,
+                    theme,
+                ) {
+                    self.snap.global_shortcut_toggle = preset.to_string();
+                    self.send(UiCmd::SetGlobalShortcutToggle(preset.to_string()));
                 }
             }
         });
@@ -2262,9 +1680,9 @@ impl ZenhushApp {
         ui.label(
             RichText::new(format!(
                 "Play: {}  |  {}",
-                self.global_shortcut_play, self.shortcuts.status_note
+                self.snap.global_shortcut_play, self.snap.shortcut_status
             ))
-            .size(11.0)
+            .size(10.5)
             .color(theme.subtext),
         );
         ui.label(
@@ -2275,70 +1693,72 @@ impl ZenhushApp {
             .color(theme.subtext),
         );
         ui.label(
-            RichText::new(format!("Output: {}", truncate_chars(self.audio.device_name(), 34)))
-                .size(10.5)
-                .color(theme.subtext),
+            RichText::new(format!(
+                "Output: {}",
+                truncate_chars(&self.snap.device_name, 34)
+            ))
+            .size(10.5)
+            .color(theme.subtext),
         );
     }
 }
 
-impl eframe::App for ZenhushApp {
+impl eframe::App for ZenhushUiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.shortcuts.bind_egui_ctx(ctx);
-        self.process_external_events(ctx);
-        self.audio.maintain();
-        self.tick();
+        let mut msgs = Vec::new();
+        while let Ok(m) = self.client.rx.try_recv() {
+            msgs.push(m);
+        }
+        for m in msgs {
+            match m {
+                CoreToUi::Snapshot(s) => self.snap = s,
+                CoreToUi::Focus => {
+                    self.suppress_hide_until = Instant::now() + Duration::from_millis(350);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                CoreToUi::Close => {
+                    self.close_popup(ctx);
+                    return;
+                }
+            }
+        }
 
-        // Save position if dragged in Free mode (debounced so it persists safely)
-        if self.dock_anchor == DockAnchor::Free {
+        if self.snap.dock_anchor == DockAnchor::Free {
             if let Some(pos) = ctx.input(|i| i.viewport().outer_rect.map(|r| [r.min.x, r.min.y])) {
-                if self.saved_pos != Some(pos) {
-                    self.saved_pos = Some(pos);
+                if self.snap.saved_pos != Some(pos) {
+                    self.snap.saved_pos = Some(pos);
                     self.last_pos_change = Some(Instant::now());
                 }
             }
             if let Some(changed_at) = self.last_pos_change {
-                if changed_at.elapsed() >= Duration::from_millis(600) {
+                if changed_at.elapsed() >= Duration::from_millis(500) {
                     self.last_pos_change = None;
-                    self.save_settings();
+                    self.send(UiCmd::SetSavedPos(self.snap.saved_pos));
                 }
             }
         }
 
-        // Auto-hide on focus loss unless pinned, in Notch Pill mode, or picking a file
-        if self.visible {
-            let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
-            if focused {
-                self.was_focused = true;
-            }
-            let allow_hide = !self.pinned
-                && !self.modal_open
-                && self.window_mode == WindowMode::Card
-                && Instant::now() >= self.suppress_hide_until
-                && self.tray.is_some();
-            if allow_hide && self.was_focused && !focused {
-                self.hide_window(ctx);
-            }
+        let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
+        if focused {
+            self.was_focused = true;
         }
-
-        self.sync_tray();
-
-        if !self.visible {
-            // Sleep completely when hidden & paused (0% CPU): Tray, IPC, and
-            // global hotkeys wake egui directly via ctx.request_repaint().
-            if self.playing || self.timer_end.is_some() {
-                ctx.request_repaint_after(Duration::from_millis(1000));
-            }
+        let allow_hide = !self.snap.pinned
+            && !self.modal_open
+            && self.snap.window_mode == WindowMode::Card
+            && Instant::now() >= self.suppress_hide_until
+            && self.snap.has_tray;
+        if allow_hide && self.was_focused && !focused {
+            self.close_popup(ctx);
             return;
         }
 
         self.apply_window_geometry(ctx);
-        self.handle_in_app_shortcuts(ctx);
+        self.handle_shortcuts(ctx);
         let hovering_file = self.handle_dropped_files(ctx);
 
         let theme = self.theme(ctx);
-        let is_dark = self.theme_mode == ThemeMode::Dark
-            || (self.theme_mode == ThemeMode::Auto
+        let is_dark = self.snap.theme_mode == ThemeMode::Dark
+            || (self.snap.theme_mode == ThemeMode::Auto
                 && ctx.system_theme() == Some(egui::Theme::Dark));
         let mut visuals = if is_dark {
             egui::Visuals::dark()
@@ -2355,20 +1775,15 @@ impl eframe::App for ZenhushApp {
         visuals.selection.stroke = Stroke::new(1.0_f32, theme.accent);
         ctx.set_visuals(visuals);
 
-        if self.playing || self.timer_end.is_some() || self.notice.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(75));
-        } else {
-            ctx.request_repaint_after(Duration::from_millis(250));
+        if self.snap.playing || self.snap.timer_remaining_secs.is_some() || self.snap.notice.is_some()
+        {
+            ctx.request_repaint_after(Duration::from_millis(70));
         }
 
-        match self.window_mode {
+        match self.snap.window_mode {
             WindowMode::NotchPill => self.render_notch_pill(ctx, theme),
             WindowMode::Card => self.render_card(ctx, theme, hovering_file),
         }
-    }
-
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.save_settings();
     }
 }
 

@@ -23,8 +23,11 @@ Zenhush lives quietly in your system tray / menu bar (or collapses into a sleek 
   - Streaming background decoder (< 1 MB RAM, instant start, unlimited track duration, optional smooth loop crossfade).
   - **Lock as Default** (`🔒`) pins a local audio track as Zenhush's permanent startup default.
   - Independent **Tone** modes (`Studio`, `Warm`, `Custom EQ`) so local music stays crisp and unmuffled by default.
-- **Top Bar, System Tray & Notch Pill Mode**:
-  - Runs as a native background top-bar / menu-bar app (Linux StatusNotifier via `ksni`, macOS `Accessory` menu-bar agent, Windows tray).
+- **Top Bar, System Tray, MPRIS2 & Notch Pill Mode**:
+  - Ultra-lightweight background Core (~15 MB RAM, 0% idle CPU) keeps audio, tray, global shortcuts, and MPRIS2 media controls running with zero GPU/OpenGL memory when hidden; the popup UI opens on demand and frees GPU/GL memory on close.
+  - Runs as a native background top-bar / menu-bar app (Linux StatusNotifier via `ksni` with **left-click toggle**, **middle-click Play/Pause**, and **scroll-wheel volume**; macOS `Accessory` menu-bar agent; Windows tray).
+  - **MPRIS2 D-Bus Integration (Linux)**: Hardware keyboard Play/Pause/Next/Prev media keys, `playerctl`, and GNOME's top-bar media card control Zenhush automatically.
+  - **Optional GNOME Top-Bar Pill Extension**: One-click **Install GNOME Pill** (`--install-gnome-pill`) puts a live Zenhush capsule right inside the GNOME top panel.
   - **Notch Pill Mode** collapses into a slim top-center capsule (`286×42px`) with live mini EQ, sound title, play/pause, and scroll-wheel volume control.
   - **Pin Window**, **Top Notch**, **Top Bar**, or **Draggable** placement.
 - **Instant Volume, Timers & Shortcuts**:
