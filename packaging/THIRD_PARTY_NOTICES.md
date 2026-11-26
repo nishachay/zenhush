@@ -7,14 +7,12 @@ every library sits as a separate, directly replaceable file. Full
 license texts are in `licenses/`.
 
 ## Zenhush's own code and content
-- All application code (`zenhush/`, `run_zenhush.py`), tests and
-  packaging scripts were written for this project and are included in
-  this package under `source/`. No public license has been chosen yet;
-  until one is, the code is all-rights-reserved and shared privately
-  with this package's recipient only.
-- All sound is synthesized at runtime; no audio recordings or samples
-  are bundled.
-- Icon/tray PNGs were generated for this project; no third-party artwork.
+- All Zenhush application code (`src/`, `zenhush/`, `run_zenhush.py`), tests,
+  and packaging scripts are released under the MIT License (see `LICENSE`
+  at the repository root).
+- All built-in soundscapes are synthesized procedurally at runtime; no third-party
+  audio recordings or samples are bundled.
+- Icon/tray PNGs were created for this project; no third-party raster artwork.
 
 ## Qt 6.11.3 - GNU LGPL v3
 - Used via the official PySide6 6.11.3 Python wheels, unmodified and
