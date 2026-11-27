@@ -192,20 +192,51 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
     fs::write(&path, desktop).map_err(|e| e.to_string())
 }
 
-/// Install `~/.local/share/applications/zenhush.desktop` + icon on Linux.
 #[cfg(target_os = "linux")]
-pub fn install_desktop_entry() -> Result<PathBuf, String> {
-    let data_dir = dirs::data_local_dir().ok_or("No local data dir")?;
-    let apps = data_dir.join("applications");
-    let icons = data_dir.join("icons").join("hicolor").join("128x128").join("apps");
-    fs::create_dir_all(&apps).map_err(|e| e.to_string())?;
-    fs::create_dir_all(&icons).map_err(|e| e.to_string())?;
+fn write_icons_and_refresh_cache(data_dir: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
 
-    let icon_path = icons.join("zenhush.png");
-    let _ = fs::write(&icon_path, include_bytes!("../assets/icon.png"));
+    let hicolor = data_dir.join("icons").join("hicolor");
+    let dir_256 = hicolor.join("256x256").join("apps");
+    let dir_svg = hicolor.join("scalable").join("apps");
+    let dir_legacy_128 = hicolor.join("128x128").join("apps").join("zenhush.png");
+    if dir_legacy_128.exists() {
+        let _ = fs::remove_file(&dir_legacy_128);
+    }
 
-    let exe = current_exe_cmd();
-    let desktop_path = apps.join("zenhush.desktop");
+    for dir in [&hicolor, &hicolor.join("256x256"), &dir_256, &hicolor.join("scalable"), &dir_svg] {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o755));
+    }
+
+    let index_theme = hicolor.join("index.theme");
+    if !index_theme.exists() {
+        let sys_index = std::path::Path::new("/usr/share/icons/hicolor/index.theme");
+        if sys_index.exists() {
+            let _ = fs::copy(sys_index, &index_theme);
+        }
+    }
+
+    let png_path = dir_256.join("zenhush.png");
+    fs::write(&png_path, include_bytes!("../assets/icon.png")).map_err(|e| e.to_string())?;
+    let _ = fs::set_permissions(&png_path, fs::Permissions::from_mode(0o644));
+
+    let svg_path = dir_svg.join("zenhush.svg");
+    fs::write(&svg_path, include_bytes!("../assets/zenhush.svg")).map_err(|e| e.to_string())?;
+    let _ = fs::set_permissions(&svg_path, fs::Permissions::from_mode(0o644));
+
+    let _ = std::process::Command::new("gtk-update-icon-cache")
+        .args(["-f", "-t"])
+        .arg(&hicolor)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn write_desktop_file(desktop_path: &std::path::Path, exec_bin: &str) -> Result<(), String> {
     let contents = format!(
         "[Desktop Entry]\n\
          Type=Application\n\
@@ -215,11 +246,51 @@ pub fn install_desktop_entry() -> Result<PathBuf, String> {
          Exec=\"{}\" --toggle\n\
          Icon=zenhush\n\
          Terminal=false\n\
-         Categories=Audio;Music;Utility;\n\
+         Categories=AudioVideo;Audio;\n\
+         StartupNotify=true\n\
          StartupWMClass=zenhush\n",
-        exe
+        exec_bin
     );
-    fs::write(&desktop_path, contents).map_err(|e| e.to_string())?;
+    fs::write(desktop_path, contents).map_err(|e| e.to_string())?;
+    if let Some(apps) = desktop_path.parent() {
+        let _ = std::process::Command::new("update-desktop-database")
+            .arg(apps)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    Ok(())
+}
+
+/// Ensure icons and icon cache are up-to-date if a desktop launcher exists.
+#[cfg(target_os = "linux")]
+pub fn ensure_icon_assets_fresh() {
+    let Some(data_dir) = dirs::data_local_dir() else {
+        return;
+    };
+    let hicolor = data_dir.join("icons").join("hicolor");
+    let svg = hicolor.join("scalable").join("apps").join("zenhush.svg");
+    let png = hicolor.join("256x256").join("apps").join("zenhush.png");
+    let desktop = data_dir.join("applications").join("zenhush.desktop");
+    if desktop.exists() && (!svg.exists() || !png.exists()) {
+        let _ = write_icons_and_refresh_cache(&data_dir);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn ensure_icon_assets_fresh() {}
+
+/// Install `~/.local/share/applications/zenhush.desktop` + icons on Linux.
+#[cfg(target_os = "linux")]
+pub fn install_desktop_entry() -> Result<PathBuf, String> {
+    let data_dir = dirs::data_local_dir().ok_or("No local data dir")?;
+    let apps = data_dir.join("applications");
+    fs::create_dir_all(&apps).map_err(|e| e.to_string())?;
+    write_icons_and_refresh_cache(&data_dir)?;
+
+    let exe = current_exe_cmd();
+    let desktop_path = apps.join("zenhush.desktop");
+    write_desktop_file(&desktop_path, &exe)?;
     Ok(desktop_path)
 }
 
@@ -248,31 +319,11 @@ pub fn install_to_user_local() -> Result<String, String> {
 
     let data_dir = dirs::data_local_dir().ok_or("No local data dir")?;
     let apps = data_dir.join("applications");
-    let icons = data_dir.join("icons").join("hicolor").join("128x128").join("apps");
     fs::create_dir_all(&apps).map_err(|e| e.to_string())?;
-    fs::create_dir_all(&icons).map_err(|e| e.to_string())?;
-
-    let icon_path = icons.join("zenhush.png");
-    fs::write(&icon_path, include_bytes!("../assets/icon.png")).map_err(|e| e.to_string())?;
+    write_icons_and_refresh_cache(&data_dir)?;
 
     let desktop_path = apps.join("zenhush.desktop");
-    let contents = format!(
-        "[Desktop Entry]\n\
-         Type=Application\n\
-         Name=Zenhush\n\
-         GenericName=Focus Audio Machine\n\
-         Comment=Top-bar focus soundscapes & local audio loop\n\
-         Exec=\"{}\" --toggle\n\
-         Icon=zenhush\n\
-         Terminal=false\n\
-         Categories=Audio;Music;Utility;\n\
-         StartupWMClass=zenhush\n",
-        target_bin.display()
-    );
-    fs::write(&desktop_path, contents).map_err(|e| e.to_string())?;
-    let _ = std::process::Command::new("update-desktop-database")
-        .arg(&apps)
-        .status();
+    write_desktop_file(&desktop_path, &target_bin.to_string_lossy())?;
 
     Ok(format!(
         "Installed binary to {} and launcher to {}",
@@ -299,19 +350,33 @@ pub fn uninstall_from_user_local() -> Result<String, String> {
         }
     }
     if let Some(data_dir) = dirs::data_local_dir() {
-        let desktop = data_dir.join("applications").join("zenhush.desktop");
+        let apps = data_dir.join("applications");
+        let desktop = apps.join("zenhush.desktop");
         if desktop.exists() {
             let _ = fs::remove_file(&desktop);
         }
-        let icon = data_dir
-            .join("icons")
-            .join("hicolor")
-            .join("128x128")
-            .join("apps")
-            .join("zenhush.png");
-        if icon.exists() {
-            let _ = fs::remove_file(&icon);
+        let hicolor = data_dir.join("icons").join("hicolor");
+        for rel in [
+            "128x128/apps/zenhush.png",
+            "256x256/apps/zenhush.png",
+            "scalable/apps/zenhush.svg",
+        ] {
+            let p = hicolor.join(rel);
+            if p.exists() {
+                let _ = fs::remove_file(&p);
+            }
         }
+        let _ = std::process::Command::new("gtk-update-icon-cache")
+            .args(["-f", "-t"])
+            .arg(&hicolor)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = std::process::Command::new("update-desktop-database")
+            .arg(&apps)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
     }
     Ok("Removed ~/.local/bin/zenhush, desktop launcher, icon, and autostart".to_string())
 }

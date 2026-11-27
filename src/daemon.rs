@@ -52,7 +52,17 @@ fn format_duration(secs: u64) -> String {
 }
 
 pub fn run_daemon(open_ui_on_start: bool) {
+    let Some(_daemon_lock) = crate::ipc::InstanceLock::try_acquire("zenhush-daemon") else {
+        if open_ui_on_start {
+            let _ = crate::ipc::wait_and_send_to_existing(RemoteCmd::Show, 1500);
+        }
+        return;
+    };
+
     let main_thread = Arc::new(thread::current());
+    // Bind IPC + UI bridge within ~2ms so `--ui` and rapid double-clicks never race
+    let ipc = IpcServer::start(Some(main_thread.clone()));
+    let bridge = BridgeServer::start(Some(main_thread.clone()));
     let mut settings = settings::load();
 
     // Auto-install/upgrade native GNOME Top-Bar Popover extension on GNOME desktops
@@ -125,8 +135,6 @@ pub fn run_daemon(open_ui_on_start: bool) {
     } else {
         Tray::new(Some(main_thread.clone()))
     };
-    let ipc = IpcServer::start(Some(main_thread.clone()));
-    let bridge = BridgeServer::start(Some(main_thread.clone()));
     let shortcuts = ShortcutManager::new(
         &settings.global_shortcut_toggle,
         &settings.global_shortcut_play,
@@ -406,7 +414,9 @@ impl Core {
 
     fn ui_is_open(&mut self) -> bool {
         self.reap_ui_child();
-        self.bridge.as_ref().map(|b| b.has_client()).unwrap_or(false) || self.ui_child.is_some()
+        self.bridge.as_ref().map(|b| b.has_client()).unwrap_or(false)
+            || self.ui_child.is_some()
+            || crate::ipc::InstanceLock::is_locked("zenhush-ui")
     }
 
     fn open_ui(&mut self, activation_token: Option<String>) {

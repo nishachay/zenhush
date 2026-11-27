@@ -15,14 +15,14 @@ mod linux {
     use zbus::zvariant::OwnedValue;
 
     const UUID: &str = "zenhush@zenhush.app";
-    const EXT_VERSION: u32 = 5;
+    const EXT_VERSION: u32 = 6;
 
     const METADATA_JSON: &str = r#"{
   "uuid": "zenhush@zenhush.app",
   "name": "Zenhush",
   "description": "Minimal focus audio player directly in your GNOME top bar.",
   "shell-version": ["45", "46", "47", "48", "49", "50", "51"],
-  "version": 5
+  "version": 6
 }
 "#;
 
@@ -563,7 +563,7 @@ class ZenhushIndicator extends PanelMenu.Button {
         this._timerBtn.connect('clicked', () => this._callCtrl('CycleTimer', null));
 
         this._pickFileBtn = new St.Button({
-            label: 'Choose File…',
+            label: '+ My Audio…',
             style_class: 'zenhush-action-pill',
             can_focus: true,
             x_expand: true,
@@ -577,14 +577,15 @@ class ZenhushIndicator extends PanelMenu.Button {
         actRow.add_child(this._pickFileBtn);
         root.add_child(actRow);
 
-        // 5. Local File & Lock Default Strip (always visible so Lock default is discoverable)
+        // 5. Sleek Local Track Pill (only visible when user has chosen a local file)
         this._fileRow = new St.BoxLayout({
             style_class: 'zenhush-file-row',
             x_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
+            visible: false,
         });
         this._fileSelectBtn = new St.Button({
-            label: 'No local track chosen',
+            label: 'Local track',
             style_class: 'zenhush-file-name',
             can_focus: true,
             x_expand: true,
@@ -599,8 +600,23 @@ class ZenhushIndicator extends PanelMenu.Button {
             }
         });
 
+        this._lockIcon = new St.Icon({
+            icon_name: 'changes-allow-symbolic',
+            icon_size: 12,
+        });
+        const lockContent = new St.BoxLayout({
+            style: 'spacing: 5px;',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        lockContent.add_child(this._lockIcon);
+        this._lockLabel = new St.Label({
+            text: 'Default',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        lockContent.add_child(this._lockLabel);
+
         this._lockBtn = new St.Button({
-            label: 'Lock default',
+            child: lockContent,
             style_class: 'zenhush-lock-pill',
             can_focus: true,
         });
@@ -738,8 +754,9 @@ class ZenhushIndicator extends PanelMenu.Button {
             this._timerBtn.style_class = 'zenhush-action-pill';
         }
 
-        // File row (always visible: lets user choose or lock default from launch)
-        this._fileRow.visible = true;
+        // File row (shown only when a local track is chosen — zero empty box clutter)
+        this._pickFileBtn.label = st.has_file ? 'Change File…' : '+ My Audio…';
+        this._fileRow.visible = Boolean(st.has_file);
         this._clearFileBtn.visible = Boolean(st.has_file);
         if (st.has_file) {
             this._fileRow.style_class = st.is_file ? 'zenhush-file-row active' : 'zenhush-file-row';
@@ -747,15 +764,14 @@ class ZenhushIndicator extends PanelMenu.Button {
             this._fileSelectBtn.label = trunc(fullName, 17);
             this._fileSelectBtn.has_tooltip = true;
             this._fileSelectBtn.tooltip_text = `Play ${fullName}`;
-            this._lockBtn.label = st.locked_default ? 'Locked ✓' : 'Lock default';
+            this._lockIcon.icon_name = st.locked_default
+                ? 'changes-prevent-symbolic'
+                : 'changes-allow-symbolic';
             this._lockBtn.style_class = st.locked_default ? 'zenhush-lock-pill locked' : 'zenhush-lock-pill';
-        } else {
-            this._fileRow.style_class = 'zenhush-file-row';
-            this._fileSelectBtn.label = 'No file chosen';
-            this._fileSelectBtn.has_tooltip = true;
-            this._fileSelectBtn.tooltip_text = 'Choose a local audio file';
-            this._lockBtn.label = 'Lock default';
-            this._lockBtn.style_class = 'zenhush-lock-pill';
+            this._lockBtn.has_tooltip = true;
+            this._lockBtn.tooltip_text = st.locked_default
+                ? 'Locked: always opens Zenhush with this track on launch'
+                : 'Lock as startup default even after playing other sounds';
         }
 
         // Footer

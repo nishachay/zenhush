@@ -64,7 +64,7 @@ fn spawn_background_daemon() -> bool {
     if cmd.spawn().is_err() {
         return false;
     }
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(4);
     while Instant::now() < deadline {
         if bridge::bridge_ready() {
             return true;
@@ -75,6 +75,11 @@ fn spawn_background_daemon() -> bool {
 }
 
 fn run_ui_window() {
+    let Some(_ui_lock) = ipc::InstanceLock::try_acquire("zenhush-ui") else {
+        let _ = ipc::try_send_to_existing(ipc::RemoteCmd::Show);
+        return;
+    };
+
     let client = match bridge::BridgeClient::connect() {
         Ok(c) => c,
         Err(e) => {
@@ -84,20 +89,31 @@ fn run_ui_window() {
     };
 
     let loaded = settings::load();
-    let init_w = 312.0_f32;
-    let init_h = 354.0_f32;
+    let has_file = loaded.active_file.is_some()
+        || loaded
+            .locked_default_file
+            .as_ref()
+            .map(|p| p.is_file())
+            .unwrap_or(false);
+    let gnome_hint = shortcuts::is_gnome() && !gnome_ext::is_active();
+    let init_w = 340.0_f32;
+    let mut init_h = if has_file { 398.0_f32 } else { 354.0_f32 };
+    if gnome_hint {
+        init_h += 28.0;
+    }
 
     let use_transparent =
         cfg!(not(target_os = "linux")) || std::env::var_os("WAYLAND_DISPLAY").is_some();
 
     let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Zenhush")
         .with_app_id("zenhush")
         .with_inner_size([init_w, init_h])
-        .with_min_inner_size([280.0, 280.0])
-        .with_max_inner_size([360.0, 460.0])
+        .with_min_inner_size([296.0, 310.0])
+        .with_max_inner_size([560.0, 720.0])
+        .with_resizable(true)
         .with_decorations(false)
         .with_always_on_top()
-        .with_resizable(false)
         .with_transparent(use_transparent)
         .with_taskbar(false);
 
@@ -213,30 +229,39 @@ fn main() {
         return;
     }
 
+    shortcuts::ensure_icon_assets_fresh();
+
     if cli.ui_mode {
         run_ui_window();
         return;
     }
 
     if cli.daemon_mode || cli.start_background {
-        if ipc::try_send_to_existing(ipc::RemoteCmd::Show) {
-            if cli.start_background {
-                return;
+        if ipc::InstanceLock::is_locked("zenhush-daemon") {
+            if !cli.start_background {
+                let _ = ipc::wait_and_send_to_existing(ipc::RemoteCmd::Show, 4000);
             }
+            return;
         }
         daemon::run_daemon(false);
         return;
     }
 
-    // If another instance is already running, forward CLI command (or Toggle) and exit
+    // If another instance is already running (or mid-startup), forward command and exit
     if let Some(cmd) = cli.command {
-        if ipc::try_send_to_existing(cmd) {
+        if ipc::try_send_to_existing(cmd)
+            || (ipc::InstanceLock::is_locked("zenhush-daemon")
+                && ipc::wait_and_send_to_existing(cmd, 4000))
+        {
             return;
         }
         if matches!(cmd, ipc::RemoteCmd::Quit) {
             return;
         }
-    } else if ipc::try_send_to_existing(ipc::RemoteCmd::Toggle) {
+    } else if ipc::try_send_to_existing(ipc::RemoteCmd::Toggle)
+        || (ipc::InstanceLock::is_locked("zenhush-daemon")
+            && ipc::wait_and_send_to_existing(ipc::RemoteCmd::Toggle, 4000))
+    {
         return;
     }
 

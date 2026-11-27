@@ -24,7 +24,8 @@ use crate::shortcuts;
 use crate::synth::Sound;
 use crate::theme::{Theme, DARK, LIGHT};
 
-const CARD_W: f32 = 312.0;
+const DEFAULT_CARD_W: f32 = 340.0;
+const EDGE_RESIZE_PX: f32 = 6.0;
 const BAR_COUNT: usize = 8;
 const IDLE_BARS: [f32; BAR_COUNT] = [0.35, 0.60, 0.80, 0.55, 0.90, 0.65, 0.45, 0.30];
 const TIMER_CYCLE: [(u32, &str); 5] = [
@@ -114,7 +115,7 @@ impl ZenhushUiApp {
             start_in_background: settings.start_in_background,
             autostart_enabled: shortcuts::is_autostart_enabled(),
             gnome_pill_installed: false,
-            gnome_popover_active: false,
+            gnome_popover_active: crate::gnome_ext::is_active(),
             picking_file: false,
             global_shortcut_toggle: settings.global_shortcut_toggle,
             global_shortcut_play: settings.global_shortcut_play,
@@ -122,15 +123,28 @@ impl ZenhushUiApp {
             has_tray: true,
         };
 
+        let init_h = Self::ideal_height(
+            snap.active_file.is_some(),
+            shortcuts::is_gnome() && !snap.gnome_popover_active,
+        );
+
         ZenhushUiApp {
             client,
             snap,
             icons: IconCache::new(),
             was_focused: false,
-            suppress_hide_until: Instant::now() + Duration::from_millis(400),
+            suppress_hide_until: Instant::now() + Duration::from_millis(450),
             anchor_applied: false,
-            last_window_size: [CARD_W, 354.0],
+            last_window_size: [DEFAULT_CARD_W, init_h],
         }
+    }
+
+    fn ideal_height(has_file: bool, gnome_hint: bool) -> f32 {
+        let mut h = if has_file { 398.0 } else { 354.0 };
+        if gnome_hint {
+            h += 28.0;
+        }
+        h
     }
 
     fn send(&self, cmd: UiCmd) {
@@ -181,14 +195,6 @@ impl ZenhushUiApp {
         }
     }
 
-    fn display_title(&self) -> String {
-        if self.snap.is_file_mode {
-            truncate_chars(&self.active_track_title(), 19)
-        } else {
-            self.snap.active_sound.title().to_string()
-        }
-    }
-
     fn display_subtitle(&self) -> String {
         if let Some(ref err) = self.snap.audio_error {
             return truncate_chars(err, 28);
@@ -226,33 +232,33 @@ impl ZenhushUiApp {
         }
     }
 
-    /// Exact vertical stack so top margin == bottom margin with zero clipping:
-    /// outer margins (14+14=28) + topbar (28) + 12 + hero (68) + 14
-    /// + 4x2 chips (70) + 14 + volume (28) + 12 + actions (32)
-    /// + 10 + local file & lock card (38) = 354px
-    /// + single-line GNOME tip (8 + 16 = 24px -> 378px)
-    fn target_height(&self) -> f32 {
-        let mut h = 354.0;
-        if shortcuts::is_gnome() && !self.snap.gnome_popover_active {
-            h += 24.0;
-        }
-        h
-    }
-
     fn apply_window_geometry(&mut self, ctx: &egui::Context) {
-        let w = CARD_W;
-        let h = self.target_height();
-        if (w - self.last_window_size[0]).abs() > 0.5
-            || (h - self.last_window_size[1]).abs() > 0.5
-        {
-            self.last_window_size = [w, h];
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(w, h)));
+        let cur_rect = ctx.input(|i| i.viewport().inner_rect);
+        let cur_w = cur_rect.map(|r| r.width()).unwrap_or(self.last_window_size[0]);
+        let cur_h = cur_rect.map(|r| r.height()).unwrap_or(self.last_window_size[1]);
+        let need_h = Self::ideal_height(
+            self.snap.active_file.is_some(),
+            shortcuts::is_gnome() && !self.snap.gnome_popover_active,
+        );
+
+        // Expand cleanly if new content appears (or initial ideal height increased),
+        // without overriding user's manual width resize.
+        if (need_h - self.last_window_size[1]).abs() > 0.5 && cur_h + 1.0 < need_h {
+            self.last_window_size = [cur_w.max(DEFAULT_CARD_W), need_h];
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(
+                self.last_window_size[0],
+                need_h,
+            )));
             if self.snap.dock_anchor != DockAnchor::Free {
                 self.anchor_applied = false;
             }
+        } else {
+            self.last_window_size[0] = cur_w;
         }
+
         if !self.anchor_applied {
             if let Some(mon) = ctx.input(|i| i.viewport().monitor_size) {
+                let w = cur_w.max(DEFAULT_CARD_W);
                 let pos = match self.snap.dock_anchor {
                     DockAnchor::TopCenter => Some(Pos2::new(((mon.x - w) * 0.5).max(8.0), 36.0)),
                     DockAnchor::TopRight => Some(Pos2::new((mon.x - w - 16.0).max(8.0), 36.0)),
@@ -262,6 +268,41 @@ impl ZenhushUiApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(p));
                 }
                 self.anchor_applied = true;
+            }
+        }
+    }
+
+    fn handle_edge_resize(&mut self, ctx: &egui::Context) {
+        let Some(rect) = ctx.input(|i| i.viewport().inner_rect) else {
+            return;
+        };
+        let size = rect.size();
+        let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else {
+            return;
+        };
+        let left = pos.x <= EDGE_RESIZE_PX;
+        let right = pos.x >= size.x - EDGE_RESIZE_PX;
+        let top = pos.y <= EDGE_RESIZE_PX;
+        let bottom = pos.y >= size.y - EDGE_RESIZE_PX;
+
+        let dir = match (left, right, top, bottom) {
+            (true, false, true, false) => Some((egui::ResizeDirection::NorthWest, egui::CursorIcon::ResizeNwSe)),
+            (false, true, true, false) => Some((egui::ResizeDirection::NorthEast, egui::CursorIcon::ResizeNeSw)),
+            (true, false, false, true) => Some((egui::ResizeDirection::SouthWest, egui::CursorIcon::ResizeNeSw)),
+            (false, true, false, true) => Some((egui::ResizeDirection::SouthEast, egui::CursorIcon::ResizeNwSe)),
+            (true, false, false, false) => Some((egui::ResizeDirection::West, egui::CursorIcon::ResizeHorizontal)),
+            (false, true, false, false) => Some((egui::ResizeDirection::East, egui::CursorIcon::ResizeHorizontal)),
+            (false, false, true, false) => Some((egui::ResizeDirection::North, egui::CursorIcon::ResizeVertical)),
+            (false, false, false, true) => Some((egui::ResizeDirection::South, egui::CursorIcon::ResizeVertical)),
+            _ => None,
+        };
+
+        if let Some((resize_dir, cursor)) = dir {
+            ctx.set_cursor_icon(cursor);
+            if ctx.input(|i| i.pointer.primary_pressed()) {
+                self.snap.dock_anchor = DockAnchor::Free;
+                self.send(UiCmd::SetDockAnchor(DockAnchor::Free));
+                ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(resize_dir));
             }
         }
     }
@@ -431,6 +472,10 @@ impl ZenhushUiApp {
             .inner_margin(egui::Margin::same(14));
 
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+                .show(ui, |ui| {
             ui.spacing_mut().item_spacing = Vec2::ZERO;
             let avail_w = ui.available_width();
 
@@ -536,12 +581,14 @@ impl ZenhushUiApp {
                 ui.allocate_ui(Vec2::new(text_w, 48.0), |ui| {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::ZERO;
+                        let max_chars = ((text_w / 8.8).round() as usize).clamp(14, 42);
+                        let shown_title = truncate_chars(&full_name, max_chars);
                         let title_resp = ui.label(
-                            RichText::new(self.display_title())
+                            RichText::new(&shown_title)
                                 .font(bold_font(16.0))
                                 .color(theme.text),
                         );
-                        if full_name != self.display_title() {
+                        if full_name != shown_title {
                             title_resp.on_hover_text(&full_name);
                         }
                         ui.add_space(4.0);
@@ -634,14 +681,19 @@ impl ZenhushUiApp {
 
             ui.add_space(14.0);
 
-            // 3. Homogeneous 4x2 Sound Chips (32px tall, >= 6:1 contrast on active)
+            // 3. Responsive Sound Grid (4 columns normally, adapts to 2 columns if narrowed)
+            let cols = if avail_w >= 260.0 { 4 } else { 2 };
+            let rows = (Sound::ALL.len() + cols - 1) / cols;
             let chip_gap = 6.0;
-            let chip_w = (avail_w - chip_gap * 3.0) / 4.0;
-            for row in 0..2 {
+            let chip_w = (avail_w - chip_gap * (cols as f32 - 1.0)) / cols as f32;
+            for row in 0..rows {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::new(chip_gap, 0.0);
-                    for col in 0..4 {
-                        let sound = Sound::ALL[row * 4 + col];
+                    for col in 0..cols {
+                        let idx = row * cols + col;
+                        let Some(&sound) = Sound::ALL.get(idx) else {
+                            continue;
+                        };
                         let active = !self.snap.is_file_mode && self.snap.active_sound == sound;
                         let (rect, resp) =
                             ui.allocate_exact_size(Vec2::new(chip_w, 32.0), Sense::click());
@@ -682,7 +734,7 @@ impl ZenhushUiApp {
                         }
                     }
                 });
-                if row == 0 {
+                if row + 1 < rows {
                     ui.add_space(6.0);
                 }
             }
@@ -866,67 +918,84 @@ impl ZenhushUiApp {
                     egui::Align2::CENTER_CENTER,
                     if self.snap.picking_file {
                         "Choosing…"
+                    } else if self.snap.active_file.is_some() {
+                        "Change File…"
                     } else {
-                        "Choose File…"
+                        "+ My Audio…"
                     },
                     semibold_font(12.0),
                     theme.text,
                 );
                 if f_resp
-                    .on_hover_text("Choose or drop your own local audio file (O)")
+                    .on_hover_text("Choose or drop an audio file — automatically remembered on launch (O)")
                     .clicked()
                 {
                     self.pick_local_file_async(false);
                 }
             });
 
-            ui.add_space(10.0);
-
-            // 6. Local File & Lock Default Strip (ALWAYS visible from launch so Lock default is obvious!)
-            let (row_rect, _) = ui.allocate_exact_size(Vec2::new(avail_w, 38.0), Sense::hover());
-            let rp = ui.painter_at(row_rect);
-            rp.rect_filled(
-                row_rect,
-                CornerRadius::same(10),
-                if self.snap.is_file_mode {
-                    theme.accent.gamma_multiply(0.14)
-                } else {
-                    theme.inset
-                },
-            );
-            if self.snap.is_file_mode {
-                rp.rect_stroke(
+            // 6. Clean Local Track Pill (only shown when a local file is loaded — zero empty box clutter)
+            if let Some(file_path) = self.snap.active_file.clone() {
+                ui.add_space(10.0);
+                let (row_rect, _) = ui.allocate_exact_size(Vec2::new(avail_w, 34.0), Sense::hover());
+                let rp = ui.painter_at(row_rect);
+                rp.rect_filled(
                     row_rect,
-                    CornerRadius::same(10),
-                    Stroke::new(1.5_f32, theme.accent),
-                    egui::StrokeKind::Inside,
+                    CornerRadius::same(9),
+                    if self.snap.is_file_mode {
+                        theme.accent.gamma_multiply(0.14)
+                    } else {
+                        theme.inset
+                    },
                 );
-            }
+                if self.snap.is_file_mode {
+                    rp.rect_stroke(
+                        row_rect,
+                        CornerRadius::same(9),
+                        Stroke::new(1.0_f32, theme.accent.gamma_multiply(0.55)),
+                        egui::StrokeKind::Inside,
+                    );
+                }
 
-            let mut child_ui = ui.new_child(
-                egui::UiBuilder::new().max_rect(row_rect.shrink2(Vec2::new(8.0, 6.0))),
-            );
-            child_ui.horizontal_centered(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
-                let has_file = self.snap.active_file.is_some();
-                let lock_w = 88.0_f32;
-                let remove_w = if has_file { 30.0 } else { 0.0 };
-                let name_w = (ui.available_width() - lock_w - remove_w).max(50.0);
+                let mut child_ui = ui.new_child(
+                    egui::UiBuilder::new().max_rect(row_rect.shrink2(Vec2::new(8.0, 4.0))),
+                );
+                child_ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
+                    let locked = self.is_locked_default();
+                    let lock_w = if locked { 72.0 } else { 68.0 };
+                    let remove_w = 26.0;
+                    let name_w = (ui.available_width() - lock_w - remove_w - 8.0).max(50.0);
 
-                let (n_rect, n_resp) =
-                    ui.allocate_exact_size(Vec2::new(name_w, 26.0), Sense::click());
-                if has_file {
                     let full_track = self.active_track_title();
-                    ui.painter_at(n_rect).text(
-                        Pos2::new(n_rect.min.x, n_rect.center().y),
+                    let max_track_chars = ((name_w / 7.2).round() as usize).clamp(10, 32);
+                    let shown_track = truncate_chars(&full_track, max_track_chars);
+
+                    let (n_rect, n_resp) =
+                        ui.allocate_exact_size(Vec2::new(name_w, 26.0), Sense::click());
+                    let np = ui.painter_at(n_rect);
+                    let name_col = if self.snap.is_file_mode {
+                        theme.accent_text
+                    } else {
+                        theme.text
+                    };
+                    if let Some(tex) = self.icons.texture(ui.ctx(), IconKind::Music, name_col, 13) {
+                        np.image(
+                            tex.id(),
+                            Rect::from_center_size(
+                                Pos2::new(n_rect.min.x + 8.0, n_rect.center().y),
+                                Vec2::splat(13.0),
+                            ),
+                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    }
+                    np.text(
+                        Pos2::new(n_rect.min.x + 20.0, n_rect.center().y),
                         egui::Align2::LEFT_CENTER,
-                        truncate_chars(&full_track, 17),
+                        shown_track,
                         semibold_font(12.0),
-                        if self.snap.is_file_mode {
-                            theme.accent_text
-                        } else {
-                            theme.text
-                        },
+                        name_col,
                     );
                     if n_resp
                         .on_hover_text(format!("Play {}", full_track))
@@ -934,104 +1003,91 @@ impl ZenhushUiApp {
                     {
                         self.send(UiCmd::SelectFileMode);
                     }
-                } else {
-                    ui.painter_at(n_rect).text(
-                        Pos2::new(n_rect.min.x, n_rect.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        "No local track",
-                        semibold_font(11.5),
-                        theme.subtext,
-                    );
-                    if n_resp
-                        .on_hover_text("Choose a local audio file (O)")
-                        .clicked()
-                    {
-                        self.pick_local_file_async(false);
-                    }
-                }
 
-                let locked = self.is_locked_default();
-                let (l_rect, l_resp) =
-                    ui.allocate_exact_size(Vec2::new(lock_w, 26.0), Sense::click());
-                let lp = ui.painter_at(l_rect);
-                lp.rect_filled(
-                    l_rect,
-                    CornerRadius::same(5),
-                    if locked {
+                    // Flat inline Lock Startup Default capsule pill (clean icon + "Default")
+                    let (l_rect, l_resp) =
+                        ui.allocate_exact_size(Vec2::new(lock_w, 24.0), Sense::click());
+                    let lp = ui.painter_at(l_rect);
+                    let lock_bg = if locked {
                         theme.accent
                     } else if l_resp.hovered() {
                         theme.hover
                     } else {
-                        theme.card
-                    },
-                );
-                if l_resp.has_focus() {
-                    lp.rect_stroke(
-                        l_rect,
-                        CornerRadius::same(5),
-                        Stroke::new(2.0_f32, theme.text),
-                        egui::StrokeKind::Inside,
-                    );
-                }
-                lp.text(
-                    l_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    if locked {
-                        "Locked ✓"
-                    } else {
-                        "Lock default"
-                    },
-                    semibold_font(11.0),
-                    if locked {
+                        Color32::TRANSPARENT
+                    };
+                    if lock_bg != Color32::TRANSPARENT {
+                        lp.rect_filled(l_rect, CornerRadius::same(6), lock_bg);
+                    }
+                    if l_resp.has_focus() {
+                        lp.rect_stroke(
+                            l_rect,
+                            CornerRadius::same(6),
+                            Stroke::new(2.0_f32, theme.text),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                    let lock_fg = if locked {
                         theme.on_accent
                     } else {
-                        theme.text
-                    },
-                );
-                let lock_tip = if !has_file {
-                    "Choose a file and lock it as default on launch (L)"
-                } else if locked {
-                    "Unlock default startup track (L)"
-                } else {
-                    "Lock as default track on launch (L)"
-                };
-                if l_resp.on_hover_text(lock_tip).clicked() {
-                    if let Some(p) = self.snap.active_file.clone() {
-                        self.send(UiCmd::ToggleLockDefault(p));
+                        theme.subtext
+                    };
+                    let lock_icon = if locked {
+                        IconKind::Lock
                     } else {
-                        self.pick_local_file_async(true);
+                        IconKind::Unlock
+                    };
+                    if let Some(tex) = self.icons.texture(ui.ctx(), lock_icon, lock_fg, 12) {
+                        lp.image(
+                            tex.id(),
+                            Rect::from_center_size(
+                                Pos2::new(l_rect.min.x + 12.0, l_rect.center().y),
+                                Vec2::splat(12.0),
+                            ),
+                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
                     }
-                }
+                    lp.text(
+                        Pos2::new(l_rect.min.x + 22.0, l_rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        "Default",
+                        semibold_font(11.0),
+                        lock_fg,
+                    );
+                    let lock_tip = if locked {
+                        "Locked: always opens Zenhush with this track on launch — click to unlock (L)"
+                    } else {
+                        "Lock as startup default (even if you later play Brown Noise) [L]"
+                    };
+                    if l_resp.on_hover_text(lock_tip).clicked() {
+                        self.send(UiCmd::ToggleLockDefault(file_path.clone()));
+                    }
 
-                if let Some(file_path) = self.snap.active_file.clone() {
                     if icon_button(
                         ui,
                         &mut self.icons,
                         IconKind::Close,
-                        26.0,
-                        13,
+                        24.0,
+                        12,
                         theme.subtext,
                         theme,
                         "Remove local track",
                     ) {
                         self.send(UiCmd::RemoveLocalTrack(file_path));
                     }
-                }
-            });
+                });
+            }
 
-            // 7. Single-line non-wrapping GNOME activation notice (never wraps or cuts off)
+            // 7. GNOME activation notice (wrapped safely if narrow)
             if shortcuts::is_gnome() && !self.snap.gnome_popover_active {
                 ui.add_space(8.0);
-                let (hint_rect, _) =
-                    ui.allocate_exact_size(Vec2::new(avail_w, 16.0), Sense::hover());
-                ui.painter_at(hint_rect).text(
-                    Pos2::new(hint_rect.min.x, hint_rect.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    "Log out & back in once for GNOME top bar mode",
-                    semibold_font(10.5),
-                    theme.subtext,
+                ui.label(
+                    RichText::new("Log out & back in once for top-bar popover")
+                        .font(semibold_font(11.0))
+                        .color(theme.subtext),
                 );
             }
+                });
         });
     }
 }
@@ -1052,6 +1108,7 @@ impl eframe::App for ZenhushUiApp {
         }
         self.was_focused = focused;
 
+        self.handle_edge_resize(ctx);
         self.handle_shortcuts(ctx);
         self.handle_dropped_files(ctx);
         self.apply_window_geometry(ctx);

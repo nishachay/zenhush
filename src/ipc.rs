@@ -151,23 +151,64 @@ pub fn print_help() {
 }
 
 #[cfg(unix)]
-fn socket_path() -> std::path::PathBuf {
+fn runtime_path(filename: &str) -> std::path::PathBuf {
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        std::path::PathBuf::from(dir).join("zenhush.sock")
+        std::path::PathBuf::from(dir).join(filename)
     } else {
         std::env::temp_dir().join(format!(
-            "zenhush-{}.sock",
-            std::env::var("USER").unwrap_or_else(|_| "user".into())
+            "{}-{}",
+            std::env::var("USER").unwrap_or_else(|_| "user".into()),
+            filename
         ))
     }
 }
 
 #[cfg(not(unix))]
-fn port_file_path() -> std::path::PathBuf {
+fn runtime_path(filename: &str) -> std::path::PathBuf {
     dirs::config_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("zenhush")
-        .join("ipc.port")
+        .join(filename)
+}
+
+/// Kernel-enforced exclusive lock for single-instance enforcement (`daemon` and `ui`).
+/// Released automatically by the OS even if a process terminates unexpectedly.
+pub struct InstanceLock {
+    _file: std::fs::File,
+}
+
+impl InstanceLock {
+    pub fn try_acquire(name: &str) -> Option<Self> {
+        let path = runtime_path(&format!("{}.lock", name));
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .ok()?;
+        match file.try_lock() {
+            Ok(()) => Some(InstanceLock { _file: file }),
+            Err(_) => None,
+        }
+    }
+
+    pub fn is_locked(name: &str) -> bool {
+        Self::try_acquire(name).is_none()
+    }
+}
+
+#[cfg(unix)]
+fn socket_path() -> std::path::PathBuf {
+    runtime_path("zenhush.sock")
+}
+
+#[cfg(not(unix))]
+fn port_file_path() -> std::path::PathBuf {
+    runtime_path("ipc.port")
 }
 
 /// Try sending a command to an already-running Zenhush instance.
@@ -202,6 +243,21 @@ pub fn try_send_to_existing(cmd: RemoteCmd) -> bool {
     }
 }
 
+/// If another daemon is starting up and holds its lock before finishing socket bind,
+/// wait briefly until IPC becomes ready and deliver `cmd`.
+pub fn wait_and_send_to_existing(cmd: RemoteCmd, timeout_ms: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+        if try_send_to_existing(cmd) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
 pub struct IpcServer {
     pub rx: Receiver<RemoteCmd>,
     #[cfg(unix)]
@@ -214,9 +270,12 @@ impl IpcServer {
 
         #[cfg(unix)]
         {
-            use std::os::unix::net::UnixListener;
+            use std::os::unix::net::{UnixListener, UnixStream};
             let path = socket_path();
             if path.exists() {
+                if UnixStream::connect(&path).is_ok() {
+                    return None;
+                }
                 let _ = std::fs::remove_file(&path);
             }
             let listener = UnixListener::bind(&path).ok()?;
@@ -308,5 +367,21 @@ mod tests {
         ] {
             assert_eq!(RemoteCmd::from_wire(cmd.as_wire()), Some(cmd));
         }
+    }
+
+    #[test]
+    fn instance_lock_enforces_single_owner() {
+        let name = format!("zenhush-test-{}", std::process::id());
+        let first = InstanceLock::try_acquire(&name);
+        assert!(first.is_some(), "first lock should succeed");
+        assert!(
+            InstanceLock::try_acquire(&name).is_none(),
+            "second concurrent lock must fail"
+        );
+        drop(first);
+        assert!(
+            InstanceLock::try_acquire(&name).is_some(),
+            "lock should be acquirable after drop"
+        );
     }
 }
