@@ -96,10 +96,10 @@ fn run_ui_window() {
             .map(|p| p.is_file())
             .unwrap_or(false);
     let gnome_hint = shortcuts::is_gnome() && !gnome_ext::is_active();
-    let init_w = 340.0_f32;
-    let mut init_h = if has_file { 398.0_f32 } else { 354.0_f32 };
+    let init_w = 336.0_f32;
+    let mut init_h = if has_file { 346.0_f32 } else { 296.0_f32 };
     if gnome_hint {
-        init_h += 28.0;
+        init_h += 24.0;
     }
 
     let use_transparent =
@@ -109,8 +109,8 @@ fn run_ui_window() {
         .with_title("Zenhush")
         .with_app_id("zenhush")
         .with_inner_size([init_w, init_h])
-        .with_min_inner_size([296.0, 310.0])
-        .with_max_inner_size([560.0, 720.0])
+        .with_min_inner_size([init_w, 260.0])
+        .with_max_inner_size([init_w, 520.0])
         .with_resizable(true)
         .with_decorations(false)
         .with_always_on_top()

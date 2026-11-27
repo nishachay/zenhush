@@ -24,8 +24,7 @@ use crate::shortcuts;
 use crate::synth::Sound;
 use crate::theme::{Theme, DARK, LIGHT};
 
-const DEFAULT_CARD_W: f32 = 340.0;
-const EDGE_RESIZE_PX: f32 = 6.0;
+const CARD_W: f32 = 336.0;
 const BAR_COUNT: usize = 8;
 const IDLE_BARS: [f32; BAR_COUNT] = [0.35, 0.60, 0.80, 0.55, 0.90, 0.65, 0.45, 0.30];
 const TIMER_CYCLE: [(u32, &str); 5] = [
@@ -76,7 +75,8 @@ pub struct ZenhushUiApp {
     was_focused: bool,
     suppress_hide_until: Instant,
     anchor_applied: bool,
-    last_window_size: [f32; 2],
+    measured_h: f32,
+    last_sent_h: f32,
 }
 
 impl ZenhushUiApp {
@@ -135,14 +135,15 @@ impl ZenhushUiApp {
             was_focused: false,
             suppress_hide_until: Instant::now() + Duration::from_millis(450),
             anchor_applied: false,
-            last_window_size: [DEFAULT_CARD_W, init_h],
+            measured_h: init_h,
+            last_sent_h: init_h,
         }
     }
 
     fn ideal_height(has_file: bool, gnome_hint: bool) -> f32 {
-        let mut h = if has_file { 398.0 } else { 354.0 };
+        let mut h = if has_file { 346.0 } else { 296.0 };
         if gnome_hint {
-            h += 28.0;
+            h += 24.0;
         }
         h
     }
@@ -233,32 +234,20 @@ impl ZenhushUiApp {
     }
 
     fn apply_window_geometry(&mut self, ctx: &egui::Context) {
-        let cur_rect = ctx.input(|i| i.viewport().inner_rect);
-        let cur_w = cur_rect.map(|r| r.width()).unwrap_or(self.last_window_size[0]);
-        let cur_h = cur_rect.map(|r| r.height()).unwrap_or(self.last_window_size[1]);
-        let need_h = Self::ideal_height(
-            self.snap.active_file.is_some(),
-            shortcuts::is_gnome() && !self.snap.gnome_popover_active,
-        );
+        let need_h = self.measured_h.clamp(260.0, 520.0);
 
-        // Expand cleanly if new content appears (or initial ideal height increased),
-        // without overriding user's manual width resize.
-        if (need_h - self.last_window_size[1]).abs() > 0.5 && cur_h + 1.0 < need_h {
-            self.last_window_size = [cur_w.max(DEFAULT_CARD_W), need_h];
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(
-                self.last_window_size[0],
-                need_h,
-            )));
+        // Auto-fit window height tightly to actual measured content (top == bottom margin = 14px)
+        if (need_h - self.last_sent_h).abs() > 1.0 {
+            self.last_sent_h = need_h;
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(CARD_W, need_h)));
             if self.snap.dock_anchor != DockAnchor::Free {
                 self.anchor_applied = false;
             }
-        } else {
-            self.last_window_size[0] = cur_w;
         }
 
         if !self.anchor_applied {
             if let Some(mon) = ctx.input(|i| i.viewport().monitor_size) {
-                let w = cur_w.max(DEFAULT_CARD_W);
+                let w = CARD_W;
                 let pos = match self.snap.dock_anchor {
                     DockAnchor::TopCenter => Some(Pos2::new(((mon.x - w) * 0.5).max(8.0), 36.0)),
                     DockAnchor::TopRight => Some(Pos2::new((mon.x - w - 16.0).max(8.0), 36.0)),
@@ -268,41 +257,6 @@ impl ZenhushUiApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(p));
                 }
                 self.anchor_applied = true;
-            }
-        }
-    }
-
-    fn handle_edge_resize(&mut self, ctx: &egui::Context) {
-        let Some(rect) = ctx.input(|i| i.viewport().inner_rect) else {
-            return;
-        };
-        let size = rect.size();
-        let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else {
-            return;
-        };
-        let left = pos.x <= EDGE_RESIZE_PX;
-        let right = pos.x >= size.x - EDGE_RESIZE_PX;
-        let top = pos.y <= EDGE_RESIZE_PX;
-        let bottom = pos.y >= size.y - EDGE_RESIZE_PX;
-
-        let dir = match (left, right, top, bottom) {
-            (true, false, true, false) => Some((egui::ResizeDirection::NorthWest, egui::CursorIcon::ResizeNwSe)),
-            (false, true, true, false) => Some((egui::ResizeDirection::NorthEast, egui::CursorIcon::ResizeNeSw)),
-            (true, false, false, true) => Some((egui::ResizeDirection::SouthWest, egui::CursorIcon::ResizeNeSw)),
-            (false, true, false, true) => Some((egui::ResizeDirection::SouthEast, egui::CursorIcon::ResizeNwSe)),
-            (true, false, false, false) => Some((egui::ResizeDirection::West, egui::CursorIcon::ResizeHorizontal)),
-            (false, true, false, false) => Some((egui::ResizeDirection::East, egui::CursorIcon::ResizeHorizontal)),
-            (false, false, true, false) => Some((egui::ResizeDirection::North, egui::CursorIcon::ResizeVertical)),
-            (false, false, false, true) => Some((egui::ResizeDirection::South, egui::CursorIcon::ResizeVertical)),
-            _ => None,
-        };
-
-        if let Some((resize_dir, cursor)) = dir {
-            ctx.set_cursor_icon(cursor);
-            if ctx.input(|i| i.pointer.primary_pressed()) {
-                self.snap.dock_anchor = DockAnchor::Free;
-                self.send(UiCmd::SetDockAnchor(DockAnchor::Free));
-                ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(resize_dir));
             }
         }
     }
@@ -472,10 +426,7 @@ impl ZenhushUiApp {
             .inner_margin(egui::Margin::same(14));
 
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-                .show(ui, |ui| {
+            let start_y = ui.cursor().top();
             ui.spacing_mut().item_spacing = Vec2::ZERO;
             let avail_w = ui.available_width();
 
@@ -681,19 +632,14 @@ impl ZenhushUiApp {
 
             ui.add_space(14.0);
 
-            // 3. Responsive Sound Grid (4 columns normally, adapts to 2 columns if narrowed)
-            let cols = if avail_w >= 260.0 { 4 } else { 2 };
-            let rows = (Sound::ALL.len() + cols - 1) / cols;
+            // 3. Homogeneous 4x2 Sound Grid sized cleanly to fixed card width
             let chip_gap = 6.0;
-            let chip_w = (avail_w - chip_gap * (cols as f32 - 1.0)) / cols as f32;
-            for row in 0..rows {
+            let chip_w = (avail_w - chip_gap * 3.0) / 4.0;
+            for row in 0..2 {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::new(chip_gap, 0.0);
-                    for col in 0..cols {
-                        let idx = row * cols + col;
-                        let Some(&sound) = Sound::ALL.get(idx) else {
-                            continue;
-                        };
+                    for col in 0..4 {
+                        let sound = Sound::ALL[row * 4 + col];
                         let active = !self.snap.is_file_mode && self.snap.active_sound == sound;
                         let (rect, resp) =
                             ui.allocate_exact_size(Vec2::new(chip_w, 32.0), Sense::click());
@@ -734,7 +680,7 @@ impl ZenhushUiApp {
                         }
                     }
                 });
-                if row + 1 < rows {
+                if row == 0 {
                     ui.add_space(6.0);
                 }
             }
@@ -963,8 +909,17 @@ impl ZenhushUiApp {
                 child_ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
                     let locked = self.is_locked_default();
-                    let lock_w = if locked { 72.0 } else { 68.0 };
-                    let remove_w = 26.0;
+                    let lock_fg = if locked {
+                        theme.on_accent
+                    } else {
+                        theme.subtext
+                    };
+                    let def_galley = ui.fonts(|f| {
+                        f.layout_no_wrap("Default".to_string(), semibold_font(11.0), lock_fg)
+                    });
+                    let lock_group_w = 12.0 + 5.0 + def_galley.rect.width();
+                    let lock_w = (lock_group_w + 18.0).max(70.0);
+                    let remove_w = 24.0;
                     let name_w = (ui.available_width() - lock_w - remove_w - 8.0).max(50.0);
 
                     let full_track = self.active_track_title();
@@ -1004,90 +959,92 @@ impl ZenhushUiApp {
                         self.send(UiCmd::SelectFileMode);
                     }
 
-                    // Flat inline Lock Startup Default capsule pill (clean icon + "Default")
-                    let (l_rect, l_resp) =
-                        ui.allocate_exact_size(Vec2::new(lock_w, 24.0), Sense::click());
-                    let lp = ui.painter_at(l_rect);
-                    let lock_bg = if locked {
-                        theme.accent
-                    } else if l_resp.hovered() {
-                        theme.hover
-                    } else {
-                        Color32::TRANSPARENT
-                    };
-                    if lock_bg != Color32::TRANSPARENT {
-                        lp.rect_filled(l_rect, CornerRadius::same(6), lock_bg);
-                    }
-                    if l_resp.has_focus() {
-                        lp.rect_stroke(
-                            l_rect,
-                            CornerRadius::same(6),
-                            Stroke::new(2.0_f32, theme.text),
-                            egui::StrokeKind::Inside,
-                        );
-                    }
-                    let lock_fg = if locked {
-                        theme.on_accent
-                    } else {
-                        theme.subtext
-                    };
-                    let lock_icon = if locked {
-                        IconKind::Lock
-                    } else {
-                        IconKind::Unlock
-                    };
-                    if let Some(tex) = self.icons.texture(ui.ctx(), lock_icon, lock_fg, 12) {
-                        lp.image(
-                            tex.id(),
-                            Rect::from_center_size(
-                                Pos2::new(l_rect.min.x + 12.0, l_rect.center().y),
-                                Vec2::splat(12.0),
-                            ),
-                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                            Color32::WHITE,
-                        );
-                    }
-                    lp.text(
-                        Pos2::new(l_rect.min.x + 22.0, l_rect.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        "Default",
-                        semibold_font(11.0),
-                        lock_fg,
-                    );
-                    let lock_tip = if locked {
-                        "Locked: always opens Zenhush with this track on launch — click to unlock (L)"
-                    } else {
-                        "Lock as startup default (even if you later play Brown Noise) [L]"
-                    };
-                    if l_resp.on_hover_text(lock_tip).clicked() {
-                        self.send(UiCmd::ToggleLockDefault(file_path.clone()));
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
+                        if icon_button(
+                            ui,
+                            &mut self.icons,
+                            IconKind::Close,
+                            24.0,
+                            12,
+                            theme.subtext,
+                            theme,
+                            "Remove local track",
+                        ) {
+                            self.send(UiCmd::RemoveLocalTrack(file_path.clone()));
+                        }
 
-                    if icon_button(
-                        ui,
-                        &mut self.icons,
-                        IconKind::Close,
-                        24.0,
-                        12,
-                        theme.subtext,
-                        theme,
-                        "Remove local track",
-                    ) {
-                        self.send(UiCmd::RemoveLocalTrack(file_path));
-                    }
+                        // Flat inline Lock Startup Default capsule pill (concentric 5px radius, optically centered)
+                        let (l_rect, l_resp) =
+                            ui.allocate_exact_size(Vec2::new(lock_w, 24.0), Sense::click());
+                        let lp = ui.painter_at(l_rect);
+                        let lock_bg = if locked {
+                            theme.accent
+                        } else if l_resp.hovered() {
+                            theme.hover
+                        } else {
+                            Color32::TRANSPARENT
+                        };
+                        if lock_bg != Color32::TRANSPARENT {
+                            lp.rect_filled(l_rect, CornerRadius::same(5), lock_bg);
+                        }
+                        if l_resp.has_focus() {
+                            lp.rect_stroke(
+                                l_rect,
+                                CornerRadius::same(5),
+                                Stroke::new(2.0_f32, theme.text),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        let lock_icon = if locked {
+                            IconKind::Lock
+                        } else {
+                            IconKind::Unlock
+                        };
+                        let start_x = l_rect.center().x - lock_group_w * 0.5;
+                        if let Some(tex) = self.icons.texture(ui.ctx(), lock_icon, lock_fg, 12) {
+                            lp.image(
+                                tex.id(),
+                                Rect::from_center_size(
+                                    Pos2::new(start_x + 6.0, l_rect.center().y),
+                                    Vec2::splat(12.0),
+                                ),
+                                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                        }
+                        lp.galley(
+                            Pos2::new(
+                                start_x + 17.0,
+                                l_rect.center().y - def_galley.rect.height() * 0.5,
+                            ),
+                            def_galley,
+                            lock_fg,
+                        );
+                        let lock_tip = if locked {
+                            "Locked: always opens Zenhush with this track on launch — click to unlock (L)"
+                        } else {
+                            "Lock as startup default (even if you later play Brown Noise) [L]"
+                        };
+                        if l_resp.on_hover_text(lock_tip).clicked() {
+                            self.send(UiCmd::ToggleLockDefault(file_path));
+                        }
+                    });
                 });
             }
 
             // 7. GNOME activation notice (wrapped safely if narrow)
             if shortcuts::is_gnome() && !self.snap.gnome_popover_active {
-                ui.add_space(8.0);
+                ui.add_space(10.0);
                 ui.label(
                     RichText::new("Log out & back in once for top-bar popover")
                         .font(semibold_font(11.0))
                         .color(theme.subtext),
                 );
             }
-                });
+            let ch = (ui.cursor().top() - start_y).max(160.0);
+            // 14px top + 14px bottom margin + 2px outer border
+            self.measured_h = (ch + 30.0).ceil();
         });
     }
 }
@@ -1108,13 +1065,12 @@ impl eframe::App for ZenhushUiApp {
         }
         self.was_focused = focused;
 
-        self.handle_edge_resize(ctx);
         self.handle_shortcuts(ctx);
         self.handle_dropped_files(ctx);
-        self.apply_window_geometry(ctx);
 
         let theme = self.theme(ctx);
         self.render_card(ctx, theme);
+        self.apply_window_geometry(ctx);
 
         if self.snap.playing || self.snap.timer_remaining_secs.is_some() || self.snap.picking_file {
             ctx.request_repaint_after(Duration::from_millis(250));
