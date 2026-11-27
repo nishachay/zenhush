@@ -1,13 +1,19 @@
 //! Ultra-lightweight background Core (`--daemon` / `--background`).
 //!
-//! Owns `AudioEngine`, `Tray`, `MprisServer`, `ShortcutManager`, `IpcServer`,
-//! and `BridgeServer` with zero OpenGL/Mesa/winit allocations (~15 MB RSS).
-//! Spawns `--ui` on demand when toggled and reclaims all GPU/UI memory when closed.
+//! Owns `AudioEngine`, `MprisServer` (`org.zenhush.Control`), optional fallback
+//! `Tray`, `ShortcutManager`, `IpcServer`, and `BridgeServer` with zero
+//! OpenGL/Mesa/winit allocations (~15 MB RSS, 0% idle CPU).
+//!
+//! On GNOME Linux with the native Top-Bar Popover extension active, Zenhush
+//! lives completely inside the GNOME top bar — no floating `--ui` window is
+//! spawned at all. On other desktops (macOS/Windows/KDE) or before extension
+//! activation, falls back seamlessly to the lightweight on-demand `--ui` card.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -23,12 +29,9 @@ use crate::shortcuts::{self, GlobalAction, ShortcutManager};
 use crate::synth::{FileTone, Sound, DEFAULT_DEPTH, DEFAULT_RUMBLE, DEFAULT_VOLUME};
 use crate::tray::{Tray, TrayEvent, TrayState};
 
-const BAR_COUNT: usize = 18;
-const IDLE_BARS: [f32; BAR_COUNT] = [
-    0.26, 0.42, 0.65, 0.50, 0.36, 0.78, 0.92, 0.60, 0.44, 0.85, 0.72, 0.48, 0.62, 0.38, 0.54,
-    0.40, 0.32, 0.24,
-];
-const TIMER_CYCLE: [u32; 7] = [0, 15, 25, 30, 45, 60, 90];
+const BAR_COUNT: usize = 8;
+const IDLE_BARS: [f32; BAR_COUNT] = [0.35, 0.60, 0.80, 0.55, 0.90, 0.65, 0.45, 0.30];
+const TIMER_CYCLE: [u32; 5] = [0, 25, 45, 60, 90];
 
 fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -51,6 +54,12 @@ fn format_duration(secs: u64) -> String {
 pub fn run_daemon(open_ui_on_start: bool) {
     let main_thread = Arc::new(thread::current());
     let mut settings = settings::load();
+
+    // Auto-install/upgrade native GNOME Top-Bar Popover extension on GNOME desktops
+    if shortcuts::is_gnome() {
+        gnome_ext::ensure_installed_and_enabled();
+    }
+    let gnome_popover_active = gnome_ext::is_active();
 
     let mut audio = AudioEngine::new();
     audio.set_volume(settings.volume);
@@ -110,7 +119,12 @@ pub fn run_daemon(open_ui_on_start: bool) {
         .position(|&s| s == settings.active_sound)
         .unwrap_or(0);
 
-    let tray = Tray::new(Some(main_thread.clone()));
+    // Avoid duplicate top-bar icons: only create ksni tray when GNOME popover isn't active
+    let tray = if gnome_popover_active {
+        None
+    } else {
+        Tray::new(Some(main_thread.clone()))
+    };
     let ipc = IpcServer::start(Some(main_thread.clone()));
     let bridge = BridgeServer::start(Some(main_thread.clone()));
     let shortcuts = ShortcutManager::new(
@@ -120,14 +134,19 @@ pub fn run_daemon(open_ui_on_start: bool) {
     );
     let (mpris_tx, mpris_rx): (_, Receiver<MprisCmd>) = channel();
     let mpris = MprisServer::start(mpris_tx, Some(main_thread.clone()));
+    let (file_pick_tx, file_pick_rx) = channel::<PathBuf>();
 
     let mut core = Core {
+        main_thread,
         audio,
         tray,
         ipc,
         bridge,
         mpris,
         mpris_rx,
+        file_pick_tx,
+        file_pick_rx,
+        picking_file: Arc::new(AtomicBool::new(false)),
         shortcuts,
         ui_child: None,
         ui_was_connected: false,
@@ -158,13 +177,16 @@ pub fn run_daemon(open_ui_on_start: bool) {
         start_in_background: settings.start_in_background,
         autostart_enabled: shortcuts::is_autostart_enabled(),
         gnome_pill_installed: gnome_ext::is_installed(),
+        gnome_popover_active,
         global_shortcut_toggle: settings.global_shortcut_toggle,
         global_shortcut_play: settings.global_shortcut_play,
-        rms_history: VecDeque::with_capacity(64),
+        rms_history: VecDeque::with_capacity(32),
         bar_heights: IDLE_BARS,
         notice,
         notice_until: None,
         missing_locked_file,
+        last_pushed_snap: None,
+        last_rms_push: Instant::now(),
     };
 
     if core.timer_minutes > 0 {
@@ -175,8 +197,14 @@ pub fn run_daemon(open_ui_on_start: bool) {
     }
     core.sync_outputs();
 
-    if open_ui_on_start || core.tray.is_none() {
-        core.open_ui(None);
+    if open_ui_on_start {
+        if core.gnome_popover_active {
+            // Give GNOME extension ~60ms to spot our D-Bus name, then pop open
+            thread::sleep(Duration::from_millis(60));
+            core.toggle_or_open_primary(None);
+        } else {
+            core.open_ui(None);
+        }
     }
 
     while core.running {
@@ -186,6 +214,7 @@ pub fn run_daemon(open_ui_on_start: bool) {
         core.process_mpris();
         core.process_shortcuts();
         core.process_ui_cmds();
+        core.process_picked_files();
 
         core.audio.maintain();
         core.tick();
@@ -194,26 +223,31 @@ pub fn run_daemon(open_ui_on_start: bool) {
         let ui_connected = core.bridge.as_ref().map(|b| b.has_client()).unwrap_or(false);
         if ui_connected {
             core.ui_was_connected = true;
-            core.push_snapshot();
-            thread::park_timeout(Duration::from_millis(65));
+            core.push_snapshot_if_needed();
+            if core.playing || core.timer_end.is_some() || core.notice_until.is_some() {
+                thread::park_timeout(Duration::from_millis(160));
+            } else {
+                // Zero busy-polling even while fallback UI is visible and paused
+                thread::park();
+            }
         } else {
             if core.ui_was_connected {
                 core.ui_was_connected = false;
+                core.last_pushed_snap = None;
                 if let Some(mut child) = core.ui_child.take() {
                     thread::spawn(move || {
                         let _ = child.wait();
                     });
                 }
-                // If there is no system tray, closing the popup exits the app cleanly
-                if core.tray.is_none() {
+                if core.tray.is_none() && !core.gnome_popover_active {
                     core.running = false;
                     break;
                 }
             }
             if core.playing || core.timer_end.is_some() || core.notice_until.is_some() {
-                thread::park_timeout(Duration::from_millis(450));
+                thread::park_timeout(Duration::from_millis(500));
             } else {
-                // True 0% idle CPU when hidden and paused
+                // True 0% idle CPU when paused
                 thread::park();
             }
         }
@@ -224,12 +258,16 @@ pub fn run_daemon(open_ui_on_start: bool) {
 }
 
 struct Core {
+    main_thread: Arc<thread::Thread>,
     audio: AudioEngine,
     tray: Option<Tray>,
     ipc: Option<IpcServer>,
     bridge: Option<BridgeServer>,
     mpris: Option<MprisServer>,
     mpris_rx: Receiver<MprisCmd>,
+    file_pick_tx: Sender<PathBuf>,
+    file_pick_rx: Receiver<PathBuf>,
+    picking_file: Arc<AtomicBool>,
     shortcuts: ShortcutManager,
     ui_child: Option<Child>,
     ui_was_connected: bool,
@@ -263,6 +301,7 @@ struct Core {
     start_in_background: bool,
     autostart_enabled: bool,
     gnome_pill_installed: bool,
+    gnome_popover_active: bool,
     global_shortcut_toggle: String,
     global_shortcut_play: String,
 
@@ -271,6 +310,8 @@ struct Core {
     notice: Option<(String, bool)>,
     notice_until: Option<Instant>,
     missing_locked_file: Option<PathBuf>,
+    last_pushed_snap: Option<UiSnapshot>,
+    last_rms_push: Instant,
 }
 
 impl Core {
@@ -305,7 +346,7 @@ impl Core {
     fn display_subtitle(&self) -> String {
         if self.is_file_mode {
             if self.locked_default_file.is_some() && self.locked_default_file == self.active_file {
-                "locked default track".to_string()
+                "locked default".to_string()
             } else {
                 "local audio loop".to_string()
             }
@@ -394,6 +435,19 @@ impl Core {
         }
     }
 
+    fn toggle_or_open_primary(&mut self, activation_token: Option<String>) {
+        if !self.gnome_popover_active && gnome_ext::is_active() {
+            self.gnome_popover_active = true;
+        }
+        if self.gnome_popover_active {
+            if let Some(ref mpris) = self.mpris {
+                mpris.emit_toggle_popover();
+                return;
+            }
+        }
+        self.toggle_ui(activation_token);
+    }
+
     fn toggle_ui(&mut self, activation_token: Option<String>) {
         if self.ui_is_open() {
             self.close_ui();
@@ -402,11 +456,41 @@ impl Core {
         }
     }
 
+    fn spawn_file_picker(&self) {
+        if self.picking_file.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let tx = self.file_pick_tx.clone();
+        let wake = self.main_thread.clone();
+        let flag = self.picking_file.clone();
+        thread::spawn(move || {
+            let picked = rfd::FileDialog::new()
+                .set_title("Choose local focus audio")
+                .add_filter("Audio", &["wav", "mp3", "flac", "ogg", "m4a"])
+                .pick_file();
+            flag.store(false, Ordering::Release);
+            if let Some(path) = picked {
+                let _ = tx.send(path);
+                wake.unpark();
+            }
+        });
+    }
+
+    fn process_picked_files(&mut self) {
+        let mut paths = Vec::new();
+        while let Ok(p) = self.file_pick_rx.try_recv() {
+            paths.push(p);
+        }
+        for p in paths {
+            self.add_local_file(p, true, false);
+        }
+    }
+
     fn play_selected(&mut self) {
         self.has_played = true;
         if self.is_file_mode {
             let Some(path) = self.active_file.clone() else {
-                self.open_ui(None);
+                self.spawn_file_picker();
                 return;
             };
             let handle = FileStreamHandle::new(path, self.loop_crossfade);
@@ -454,7 +538,7 @@ impl Core {
     fn restart_playback(&mut self) {
         self.has_played = true;
         if self.is_file_mode && self.active_file.is_none() {
-            self.open_ui(None);
+            self.spawn_file_picker();
             return;
         }
         if !self.audio.has_loaded_source() || self.audio.is_file() != self.is_file_mode {
@@ -483,7 +567,7 @@ impl Core {
             if let Some(first) = self.local_tracks.first().map(|t| t.path.clone()) {
                 self.active_file = Some(first);
             } else {
-                self.open_ui(None);
+                self.spawn_file_picker();
                 return;
             }
         }
@@ -492,6 +576,23 @@ impl Core {
         if self.playing {
             self.play_selected();
         }
+    }
+
+    fn remove_active_file(&mut self) {
+        if let Some(p) = self.active_file.take() {
+            self.local_tracks.retain(|t| t.path != p);
+            if self.locked_default_file.as_ref() == Some(&p) {
+                self.locked_default_file = None;
+            }
+        }
+        self.active_file = self.local_tracks.first().map(|t| t.path.clone());
+        if self.active_file.is_none() || self.is_file_mode {
+            self.is_file_mode = false;
+            if self.playing {
+                self.play_selected();
+            }
+        }
+        self.save_settings();
     }
 
     fn step_sound(&mut self, dir: i32) {
@@ -567,6 +668,16 @@ impl Core {
         self.save_settings();
     }
 
+    fn cycle_timer(&mut self) {
+        let idx = TIMER_CYCLE
+            .iter()
+            .position(|&m| m == self.timer_minutes)
+            .unwrap_or(0);
+        self.timer_minutes = TIMER_CYCLE[(idx + 1) % TIMER_CYCLE.len()];
+        self.arm_timer();
+        self.save_settings();
+    }
+
     fn arm_timer(&mut self) {
         if self.timer_minutes == 0 {
             self.timer_remaining = None;
@@ -635,13 +746,14 @@ impl Core {
         }
 
         for v in self.audio.drain_rms() {
-            if self.rms_history.len() == 64 {
+            if self.rms_history.len() == 32 {
                 self.rms_history.pop_front();
             }
             self.rms_history.push_back(v);
         }
 
-        if self.playing && !self.reduce_motion && !self.rms_history.is_empty() {
+        if self.playing && !self.reduce_motion && !self.rms_history.is_empty() && self.ui_is_open()
+        {
             let len = self.rms_history.len();
             for i in 0..BAR_COUNT {
                 let idx = len.saturating_sub(BAR_COUNT - i);
@@ -664,8 +776,8 @@ impl Core {
         };
         for cmd in cmds {
             match cmd {
-                RemoteCmd::Toggle => self.toggle_ui(None),
-                RemoteCmd::Show => self.open_ui(None),
+                RemoteCmd::Toggle => self.toggle_or_open_primary(None),
+                RemoteCmd::Show => self.toggle_or_open_primary(None),
                 RemoteCmd::PlayPause => self.toggle_play(),
                 RemoteCmd::Play => {
                     if !self.playing {
@@ -697,7 +809,7 @@ impl Core {
                         WindowMode::NotchPill => WindowMode::Card,
                     };
                     self.save_settings();
-                    if !self.ui_is_open() {
+                    if !self.gnome_popover_active && !self.ui_is_open() {
                         self.open_ui(None);
                     }
                 }
@@ -724,13 +836,14 @@ impl Core {
                     let tok = ksni::current_xdg_activation_token();
                     #[cfg(not(target_os = "linux"))]
                     let tok = None;
-                    self.toggle_ui(tok);
+                    self.toggle_or_open_primary(tok);
                 }
                 TrayEvent::TogglePlay => self.toggle_play(),
                 TrayEvent::NextSound => self.step_sound(1),
                 TrayEvent::PrevSound => self.step_sound(-1),
                 TrayEvent::SelectSound(s) => self.select_live_sound(s),
                 TrayEvent::SelectFile => self.select_file_mode(),
+                TrayEvent::PickFile => self.spawn_file_picker(),
                 TrayEvent::ToggleLockDefault => {
                     if let Some(p) = self.active_file.clone() {
                         self.toggle_lock_for_path(&p);
@@ -754,27 +867,16 @@ impl Core {
                     self.arm_timer();
                     self.save_settings();
                 }
-                TrayEvent::ToggleNotch => {
-                    self.window_mode = match self.window_mode {
-                        WindowMode::Card => WindowMode::NotchPill,
-                        WindowMode::NotchPill => WindowMode::Card,
-                    };
-                    self.save_settings();
-                    self.open_ui(None);
-                }
-                TrayEvent::TogglePin => {
-                    self.pinned = !self.pinned;
-                    self.save_settings();
-                }
                 TrayEvent::Quit => self.running = false,
             }
         }
     }
 
     fn process_mpris(&mut self) {
-        while let Ok(cmd) = self.mpris_rx.try_recv() {
+        let cmds: Vec<MprisCmd> = self.mpris_rx.try_iter().collect();
+        for cmd in cmds {
             match cmd {
-                MprisCmd::Raise => self.open_ui(None),
+                MprisCmd::Raise => self.toggle_or_open_primary(None),
                 MprisCmd::Quit => self.running = false,
                 MprisCmd::Play => {
                     if !self.playing {
@@ -793,6 +895,31 @@ impl Core {
                     self.audio.set_volume(v);
                     self.save_settings();
                 }
+                MprisCmd::SelectSound(idx) => {
+                    if let Some(&s) = Sound::ALL.get(idx as usize) {
+                        self.select_live_sound(s);
+                    }
+                }
+                MprisCmd::SelectFile => self.select_file_mode(),
+                MprisCmd::PickFile => self.spawn_file_picker(),
+                MprisCmd::ToggleLockDefault => {
+                    if let Some(p) = self.active_file.clone() {
+                        self.toggle_lock_for_path(&p);
+                    }
+                }
+                MprisCmd::RemoveFile => self.remove_active_file(),
+                MprisCmd::ToggleMute => {
+                    self.audio.set_muted(!self.audio.is_muted());
+                    self.save_settings();
+                }
+                MprisCmd::CycleTimer => self.cycle_timer(),
+                MprisCmd::ToggleAutostart => {
+                    let target = !self.autostart_enabled;
+                    if shortcuts::set_autostart(target).is_ok() {
+                        self.autostart_enabled = target;
+                    }
+                }
+                MprisCmd::OpenWindow => self.open_ui(None),
             }
         }
     }
@@ -800,7 +927,7 @@ impl Core {
     fn process_shortcuts(&mut self) {
         for act in self.shortcuts.poll() {
             match act {
-                GlobalAction::TogglePopup => self.toggle_ui(None),
+                GlobalAction::TogglePopup => self.toggle_or_open_primary(None),
                 GlobalAction::TogglePlay => self.toggle_play(),
             }
         }
@@ -903,15 +1030,7 @@ impl Core {
                     self.arm_timer();
                     self.save_settings();
                 }
-                UiCmd::CycleTimer => {
-                    let idx = TIMER_CYCLE
-                        .iter()
-                        .position(|&m| m == self.timer_minutes)
-                        .unwrap_or(0);
-                    self.timer_minutes = TIMER_CYCLE[(idx + 1) % TIMER_CYCLE.len()];
-                    self.arm_timer();
-                    self.save_settings();
-                }
+                UiCmd::CycleTimer => self.cycle_timer(),
                 UiCmd::SetTheme(t) => {
                     self.theme_mode = t;
                     self.save_settings();
@@ -971,6 +1090,7 @@ impl Core {
                     match res {
                         Ok(msg) => {
                             self.gnome_pill_installed = gnome_ext::is_installed();
+                            self.gnome_popover_active = gnome_ext::is_active();
                             self.set_notice(msg, false);
                         }
                         Err(e) => self.set_notice(e, true),
@@ -1049,19 +1169,26 @@ impl Core {
             mpris.sync(&MprisState {
                 playing: self.playing,
                 has_played: self.has_played,
+                is_file: self.is_file_mode,
+                sound_idx: self.active_sound_idx as u32,
                 title: self.display_title(),
                 subtitle: self.display_subtitle(),
                 volume: self.audio.volume(),
                 muted: self.audio.is_muted(),
+                timer_minutes: self.timer_minutes,
+                timer_remaining_secs: self.timer_remaining.map(|d| d.as_secs()),
+                has_file: self.active_file.is_some(),
+                file_title: self.active_track_title(),
+                locked_default: self.locked_default_file.is_some()
+                    && self.locked_default_file == self.active_file,
+                autostart: self.autostart_enabled,
+                audio_error: self.audio.audio_error(),
             });
         }
     }
 
-    fn push_snapshot(&self) {
-        let Some(ref b) = self.bridge else {
-            return;
-        };
-        let snap = UiSnapshot {
+    fn build_snapshot(&self) -> UiSnapshot {
+        UiSnapshot {
             playing: self.playing,
             has_played: self.has_played,
             is_file_mode: self.is_file_mode,
@@ -1095,11 +1222,53 @@ impl Core {
             start_in_background: self.start_in_background,
             autostart_enabled: self.autostart_enabled,
             gnome_pill_installed: self.gnome_pill_installed,
+            gnome_popover_active: self.gnome_popover_active,
             global_shortcut_toggle: self.global_shortcut_toggle.clone(),
             global_shortcut_play: self.global_shortcut_play.clone(),
             shortcut_status: self.shortcuts.status_note.clone(),
             has_tray: self.tray.is_some(),
+        }
+    }
+
+    fn push_snapshot_if_needed(&mut self) {
+        let Some(ref b) = self.bridge else {
+            return;
         };
-        b.send(&CoreToUi::Snapshot(snap));
+        let next = self.build_snapshot();
+        let should_push = match &self.last_pushed_snap {
+            None => true,
+            Some(prev) => {
+                // Compare everything except rms_bars cleanly; throttle rms-only updates
+                let mut prev_no_rms = prev.clone();
+                prev_no_rms.rms_bars.clear();
+                let mut next_no_rms = next.clone();
+                next_no_rms.rms_bars.clear();
+                // Ignore pure elapsed_secs increments if paused
+                if !next.playing {
+                    prev_no_rms.elapsed_secs = next_no_rms.elapsed_secs;
+                }
+                if prev_no_rms != next_no_rms {
+                    true
+                } else if self.playing
+                    && !self.reduce_motion
+                    && self.last_rms_push.elapsed() >= Duration::from_millis(160)
+                {
+                    let max_delta = prev
+                        .rms_bars
+                        .iter()
+                        .zip(&next.rms_bars)
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0.0f32, f32::max);
+                    max_delta > 0.02
+                } else {
+                    false
+                }
+            }
+        };
+        if should_push {
+            self.last_rms_push = Instant::now();
+            self.last_pushed_snap = Some(next.clone());
+            b.send(&CoreToUi::Snapshot(next));
+        }
     }
 }

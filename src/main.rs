@@ -1,12 +1,14 @@
-//! Zenhush — lightweight top-bar & notch focus audio machine.
+//! Zenhush — minimal top-bar focus audio machine.
 //!
 //! Architecture:
 //! - Background Core (`--daemon` / `--background`): owns stereo audio synthesis,
-//!   streaming local audio decoding, system tray, MPRIS2 D-Bus media controls,
+//!   streaming local audio decoding, MPRIS2 + `org.zenhush.Control` D-Bus server,
 //!   global shortcuts, and IPC (~15 MB RSS, 0% idle CPU, zero OpenGL/GPU RAM).
-//! - On-demand Popup UI (`--ui`): opens when toggled, renders the sleek Card or
-//!   Notch Pill via `eframe`, and exits cleanly when hidden so GPU/GL memory is
-//!   reclaimed immediately.
+//! - Native GNOME Top-Bar Popover (`zenhush@zenhush.app`): renders the entire
+//!   UI directly inside the GNOME top bar on Ubuntu/GNOME Wayland (zero separate
+//!   windows, zero laptop heating).
+//! - Lightweight On-Demand Fallback Window (`--ui`): used on macOS, Windows,
+//!   non-GNOME Linux, or first-run GNOME before session activation.
 
 mod app;
 mod audio;
@@ -82,20 +84,24 @@ fn run_ui_window() {
     };
 
     let loaded = settings::load();
-    let (init_w, init_h) = match loaded.window_mode {
-        settings::WindowMode::NotchPill => (286.0_f32, 42.0_f32),
-        settings::WindowMode::Card => (336.0_f32, 344.0_f32),
-    };
+    let init_w = 304.0_f32;
+    let init_h = 272.0_f32;
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([init_w, init_h])
-        .with_min_inner_size([240.0, 40.0])
-        .with_max_inner_size([400.0, 720.0])
+        .with_min_inner_size([260.0, 260.0])
+        .with_max_inner_size([360.0, 440.0])
         .with_decorations(false)
         .with_always_on_top()
         .with_resizable(false)
-        .with_transparent(true)
         .with_taskbar(false);
+
+    // Enable window transparency where composited reliably (macOS/Windows).
+    // On Linux Wayland/XWayland, opaque corners avoid black alpha-clipping glitches.
+    #[cfg(not(target_os = "linux"))]
+    {
+        viewport = viewport.with_transparent(true);
+    }
 
     if let Some(icon) = load_app_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
@@ -108,6 +114,9 @@ fn run_ui_window() {
 
     let options = eframe::NativeOptions {
         viewport,
+        depth_buffer: 0,
+        stencil_buffer: 0,
+        multisampling: 0,
         ..Default::default()
     };
 
@@ -189,7 +198,7 @@ fn main() {
         match gnome_ext::install_gnome_pill() {
             Ok(msg) => println!("{}", msg),
             Err(e) => {
-                eprintln!("GNOME Pill install failed: {}", e);
+                eprintln!("GNOME Top-Bar Popover install failed: {}", e);
                 std::process::exit(1);
             }
         }
@@ -199,7 +208,7 @@ fn main() {
         match gnome_ext::uninstall_gnome_pill() {
             Ok(msg) => println!("{}", msg),
             Err(e) => {
-                eprintln!("GNOME Pill uninstall failed: {}", e);
+                eprintln!("GNOME Top-Bar Popover uninstall failed: {}", e);
                 std::process::exit(1);
             }
         }
@@ -212,7 +221,6 @@ fn main() {
     }
 
     if cli.daemon_mode || cli.start_background {
-        // Don't spawn duplicate daemon if already running
         if ipc::try_send_to_existing(ipc::RemoteCmd::Show) {
             if cli.start_background {
                 return;
@@ -234,12 +242,21 @@ fn main() {
         return;
     }
 
-    // Fresh launch: start background Core unless user configured start_in_background
+    // Fresh launch: install GNOME extension if on GNOME, start background core,
+    // and open either the native GNOME Top-Bar Popover or the lightweight fallback card.
+    if shortcuts::is_gnome() {
+        gnome_ext::ensure_installed_and_enabled();
+    }
     let loaded = settings::load();
     if loaded.start_in_background {
         daemon::run_daemon(false);
     } else if spawn_background_daemon() {
-        run_ui_window();
+        if gnome_ext::is_active() {
+            std::thread::sleep(Duration::from_millis(60));
+            let _ = ipc::try_send_to_existing(ipc::RemoteCmd::Show);
+        } else {
+            run_ui_window();
+        }
     } else {
         daemon::run_daemon(true);
     }

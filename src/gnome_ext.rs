@@ -1,117 +1,735 @@
-//! Optional native GNOME Shell Top-Bar Pill extension (`zenhush@zenhush.app`).
+//! Native GNOME Shell Top-Bar Popover extension (`zenhush@zenhush.app`, GNOME 45–51).
 //!
-//! On GNOME Wayland, regular client windows cannot embed directly inside the
-//! top panel. This tiny zero-dependency ESM extension (GNOME Shell 45–50)
-//! adds a live Zenhush pill directly to the GNOME top bar driven by Zenhush's
-//! MPRIS D-Bus interface:
-//! - Shows a warm amber dot when playing + current sound/track name
-//! - Left-click: opens/toggles Zenhush (`Raise` / `zenhush --toggle`)
-//! - Middle-click: instant Play / Pause
-//! - Mouse wheel scroll: Volume up / down
+//! Renders the entire Zenhush experience directly inside the GNOME top bar
+//! (native PanelMenu.Button + anchored PopupMenu), driven over D-Bus by the
+//! lightweight ~15 MB Zenhush Core daemon. Zero floating OpenGL windows, zero
+//! black-corner artifacts, zero laptop heating.
 
 #[cfg(target_os = "linux")]
 mod linux {
+    use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
-    use std::process::Command;
+    use std::process::{Command, Stdio};
+
+    use zbus::zvariant::OwnedValue;
 
     const UUID: &str = "zenhush@zenhush.app";
+    const EXT_VERSION: u32 = 3;
 
     const METADATA_JSON: &str = r#"{
   "uuid": "zenhush@zenhush.app",
-  "name": "Zenhush Top-Bar Pill",
-  "description": "Live focus audio pill in the GNOME top bar (left-click toggle, middle-click play/pause, scroll volume).",
-  "shell-version": ["45", "46", "47", "48", "49", "50"],
-  "version": 1
+  "name": "Zenhush",
+  "description": "Minimal focus audio player directly in your GNOME top bar.",
+  "shell-version": ["45", "46", "47", "48", "49", "50", "51"],
+  "version": 3
 }
 "#;
 
-    const STYLESHEET_CSS: &str = r#".zenhush-pill {
-  padding: 2px 10px;
+    /// Crisp 3-bar harmonic waveform symbolic SVG icon for the GNOME top bar.
+    const SYMBOLIC_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <rect x="2" y="5" width="2.6" height="6" rx="1.3" fill="#bebebe"/>
+  <rect x="6.7" y="2" width="2.6" height="12" rx="1.3" fill="#bebebe"/>
+  <rect x="11.4" y="4" width="2.6" height="8" rx="1.3" fill="#bebebe"/>
+</svg>
+"##;
+
+    const STYLESHEET_CSS: &str = r#".zenhush-panel-pill {
+  spacing: 6px;
+  padding: 2px 9px;
   border-radius: 99px;
-  background-color: rgba(28, 24, 20, 0.55);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  margin: 2px 4px;
+  background-color: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.10);
 }
-.zenhush-pill.playing {
+.zenhush-panel-pill.playing {
   background-color: rgba(200, 130, 62, 0.22);
   border-color: rgba(200, 130, 62, 0.55);
 }
-.zenhush-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 99px;
-  background-color: rgba(168, 159, 146, 0.7);
-  margin-right: 6px;
+.zenhush-panel-icon {
+  color: rgba(235, 229, 220, 0.85);
 }
-.zenhush-pill.playing .zenhush-dot {
+.zenhush-panel-pill.playing .zenhush-panel-icon {
+  color: #E2A86C;
+}
+.zenhush-panel-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 99px;
   background-color: #E2A86C;
 }
-.zenhush-label {
+.zenhush-panel-label {
   font-size: 12px;
   font-weight: 600;
+}
+
+.zenhush-menu-item {
+  padding: 0;
+  margin: 0;
+}
+
+.zenhush-menu-root {
+  width: 296px;
+  padding: 14px;
+  spacing: 12px;
+}
+
+.zenhush-hero {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background-color: rgba(255, 255, 255, 0.06);
+  spacing: 10px;
+}
+.zenhush-title {
+  font-size: 15px;
+  font-weight: 700;
   color: #F5F1EA;
+}
+.zenhush-subtitle {
+  font-size: 11px;
+  color: #A89F92;
+}
+.zenhush-subtitle.error {
+  color: #E2A86C;
+}
+
+.zenhush-play-btn {
+  width: 42px;
+  height: 42px;
+  border-radius: 99px;
+  background-color: #C8823E;
+  color: #FFFFFF;
+}
+.zenhush-play-btn:hover {
+  background-color: #D7914D;
+}
+.zenhush-play-btn:active {
+  background-color: #A96E33;
+}
+
+.zenhush-chip {
+  padding: 7px 4px;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #D8D1C7;
+  background-color: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+.zenhush-chip:hover {
+  background-color: rgba(255, 255, 255, 0.13);
+  color: #FFFFFF;
+}
+.zenhush-chip.active {
+  background-color: #C8823E;
+  border-color: #E2A86C;
+  color: #FFFFFF;
+}
+
+.zenhush-vol-row {
+  spacing: 8px;
+}
+.zenhush-icon-btn {
+  padding: 5px;
+  border-radius: 8px;
+  color: #C9C0B4;
+  background-color: transparent;
+}
+.zenhush-icon-btn:hover {
+  background-color: rgba(255, 255, 255, 0.10);
+  color: #FFFFFF;
+}
+.zenhush-icon-btn.active {
+  color: #E2A86C;
+}
+.zenhush-vol-hit {
+  height: 20px;
+}
+.zenhush-vol-track {
+  height: 5px;
+  border-radius: 99px;
+  background-color: rgba(255, 255, 255, 0.15);
+}
+.zenhush-vol-fill {
+  height: 5px;
+  border-radius: 99px;
+  background-color: #C8823E;
+}
+.zenhush-vol-fill.muted {
+  background-color: rgba(168, 159, 146, 0.45);
+}
+.zenhush-vol-knob {
+  width: 12px;
+  height: 12px;
+  border-radius: 99px;
+  background-color: #F5F1EA;
+  border: 1.5px solid #C8823E;
+}
+.zenhush-vol-knob.muted {
+  border-color: #7D7468;
+}
+.zenhush-vol-pct {
+  font-size: 11px;
+  font-weight: 600;
+  color: #A89F92;
+  min-width: 34px;
+  text-align: right;
+}
+
+.zenhush-action-pill {
+  padding: 7px 10px;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #E2DBD0;
+  background-color: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+.zenhush-action-pill:hover {
+  background-color: rgba(255, 255, 255, 0.13);
+}
+.zenhush-action-pill.active {
+  background-color: rgba(200, 130, 62, 0.28);
+  border-color: rgba(200, 130, 62, 0.70);
+  color: #F6CBA0;
+}
+
+.zenhush-file-row {
+  spacing: 6px;
+  padding: 6px 8px;
+  border-radius: 9px;
+  background-color: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+.zenhush-file-row.active {
+  border-color: rgba(200, 130, 62, 0.70);
+  background-color: rgba(200, 130, 62, 0.16);
+}
+.zenhush-file-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: #EFE9DF;
+}
+.zenhush-lock-pill {
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #C6BDB0;
+  background-color: rgba(255, 255, 255, 0.09);
+}
+.zenhush-lock-pill:hover {
+  background-color: rgba(255, 255, 255, 0.16);
+}
+.zenhush-lock-pill.locked {
+  background-color: #C8823E;
+  color: #FFFFFF;
+}
+
+.zenhush-footer {
+  padding-top: 6px;
+  border-top-width: 1px;
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+.zenhush-footer-link {
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  color: #9A9185;
+}
+.zenhush-footer-link:hover {
+  color: #F5F1EA;
+  background-color: rgba(255, 255, 255, 0.08);
 }
 "#;
 
     const EXTENSION_JS: &str = r#"import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
+import GObject from 'gi://GObject';
 import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
+import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const BUS_NAME = 'org.mpris.MediaPlayer2.zenhush';
 const OBJ_PATH = '/org/mpris/MediaPlayer2';
 const PLAYER_IFACE = 'org.mpris.MediaPlayer2.Player';
-const ROOT_IFACE = 'org.mpris.MediaPlayer2';
+const CTRL_IFACE = 'org.zenhush.Control';
+const PROPS_IFACE = 'org.freedesktop.DBus.Properties';
 
-export default class ZenhushPillExtension extends Extension {
-    enable() {
-        this._btn = new PanelMenu.Button(0.5, 'Zenhush Pill', false);
-        this._box = new St.BoxLayout({style_class: 'zenhush-pill', y_align: Clutter.ActorAlign.CENTER});
-        this._dot = new St.Widget({style_class: 'zenhush-dot', y_align: Clutter.ActorAlign.CENTER});
-        this._label = new St.Label({text: 'Zenhush', style_class: 'zenhush-label', y_align: Clutter.ActorAlign.CENTER});
+const SOUNDS = ['Brown', 'Pink', 'White', 'Rain', 'Ocean', 'Fire', 'Forest', 'Focus'];
 
-        this._box.add_child(this._dot);
-        this._box.add_child(this._label);
-        this._btn.add_child(this._box);
+function fmtTime(secs) {
+    const s = Math.max(0, Math.floor(secs));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const r = s % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}`;
+    return `${m}:${String(r).padStart(2, '0')}`;
+}
 
-        this._btn.connect('button-press-event', (_actor, event) => {
-            const btn = event.get_button();
-            if (btn === 2) {
+function trunc(str, max) {
+    if (!str) return '';
+    return str.length > max ? str.slice(0, max - 1) + '…' : str;
+}
+
+const ZenhushIndicator = GObject.registerClass(
+class ZenhushIndicator extends PanelMenu.Button {
+    _init(extPath) {
+        super._init(0.5, 'Zenhush', false);
+
+        this._state = {
+            playing: false,
+            has_played: false,
+            is_file: false,
+            sound_idx: 0,
+            title: 'Brown Noise',
+            subtitle: 'deep and warm',
+            volume: 70,
+            muted: false,
+            timer_minutes: 0,
+            timer_remaining_secs: null,
+            has_file: false,
+            file_title: '',
+            locked_default: false,
+            autostart: false,
+            audio_error: null,
+        };
+        this._draggingVol = false;
+
+        // Top-bar pill with custom Zenhush waveform icon + optional live dot + label
+        this._pill = new St.BoxLayout({
+            style_class: 'zenhush-panel-pill',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        const iconFile = Gio.File.new_for_path(`${extPath}/zenhush-symbolic.svg`);
+        this._panelIcon = new St.Icon({
+            gicon: Gio.FileIcon.new(iconFile),
+            icon_size: 14,
+            style_class: 'zenhush-panel-icon',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._dot = new St.Widget({
+            style_class: 'zenhush-panel-dot',
+            y_align: Clutter.ActorAlign.CENTER,
+            visible: false,
+        });
+        this._panelLabel = new St.Label({
+            text: 'Zenhush',
+            style_class: 'zenhush-panel-label',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._pill.add_child(this._panelIcon);
+        this._pill.add_child(this._dot);
+        this._pill.add_child(this._panelLabel);
+        this.add_child(this._pill);
+
+        // Middle-click = instant Play/Pause; Scroll = Volume ±5%
+        this.connect('button-press-event', (_actor, event) => {
+            if (event.get_button() === 2) {
                 this._callPlayer('PlayPause');
                 return Clutter.EVENT_STOP;
             }
-            if (btn === 1 || btn === 3) {
-                this._callRoot('Raise');
-                return Clutter.EVENT_STOP;
-            }
             return Clutter.EVENT_PROPAGATE;
         });
-
-        this._btn.connect('scroll-event', (_actor, event) => {
+        this.connect('scroll-event', (_actor, event) => {
             const dir = event.get_scroll_direction();
             let delta = 0;
-            if (dir === Clutter.ScrollDirection.UP) delta = 0.05;
-            else if (dir === Clutter.ScrollDirection.DOWN) delta = -0.05;
+            if (dir === Clutter.ScrollDirection.UP) delta = 5;
+            else if (dir === Clutter.ScrollDirection.DOWN) delta = -5;
             if (delta !== 0) {
-                this._adjustVolume(delta);
+                const next = Math.max(0, Math.min(100, (this._state.volume ?? 70) + delta));
+                this._callCtrl('SetVolumePct', new GLib.Variant('(y)', [next]));
                 return Clutter.EVENT_STOP;
             }
             return Clutter.EVENT_PROPAGATE;
         });
 
-        Main.panel.addToStatusArea(this.uuid, this._btn, 0, 'center');
+        this._buildMenu();
+        this.visible = false;
+    }
+
+    _buildMenu() {
+        const containerItem = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            can_focus: false,
+            style_class: 'zenhush-menu-item',
+        });
+        containerItem.track_hover = false;
+
+        const root = new St.BoxLayout({
+            vertical: true,
+            style_class: 'zenhush-menu-root',
+        });
+
+        // 1. Hero Card: Title/Subtitle + Big Play Button
+        const hero = new St.BoxLayout({
+            style_class: 'zenhush-hero',
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        const heroText = new St.BoxLayout({
+            vertical: true,
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._titleLabel = new St.Label({text: 'Brown Noise', style_class: 'zenhush-title'});
+        this._subtitleLabel = new St.Label({text: 'deep and warm', style_class: 'zenhush-subtitle'});
+        heroText.add_child(this._titleLabel);
+        heroText.add_child(this._subtitleLabel);
+
+        this._playIcon = new St.Icon({
+            icon_name: 'media-playback-start-symbolic',
+            icon_size: 17,
+        });
+        this._playBtn = new St.Button({
+            style_class: 'zenhush-play-btn',
+            child: this._playIcon,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._playBtn.connect('clicked', () => this._callPlayer('PlayPause'));
+
+        hero.add_child(heroText);
+        hero.add_child(this._playBtn);
+        root.add_child(hero);
+
+        // 2. Homogeneous 4x2 Sound Grid (exact equal-width columns)
+        this._soundBtns = [];
+        for (let r = 0; r < 2; r++) {
+            const row = new St.Widget({
+                x_expand: true,
+                layout_manager: new Clutter.BoxLayout({
+                    orientation: Clutter.Orientation.HORIZONTAL,
+                    homogeneous: true,
+                    spacing: 6,
+                }),
+            });
+            for (let c = 0; c < 4; c++) {
+                const idx = r * 4 + c;
+                const btn = new St.Button({
+                    label: SOUNDS[idx],
+                    style_class: 'zenhush-chip',
+                    x_expand: true,
+                });
+                btn.connect('clicked', () => {
+                    this._callCtrl('SelectSound', new GLib.Variant('(u)', [idx]));
+                });
+                this._soundBtns.push(btn);
+                row.add_child(btn);
+            }
+            root.add_child(row);
+        }
+
+        // 3. Volume Row (generous hit area + knob that never clips)
+        const volRow = new St.BoxLayout({
+            style_class: 'zenhush-vol-row',
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._muteIcon = new St.Icon({
+            icon_name: 'audio-volume-high-symbolic',
+            icon_size: 15,
+        });
+        this._muteBtn = new St.Button({
+            style_class: 'zenhush-icon-btn',
+            child: this._muteIcon,
+        });
+        this._muteBtn.connect('clicked', () => this._callCtrl('ToggleMute', null));
+
+        this._volHit = new St.Widget({
+            style_class: 'zenhush-vol-hit',
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            reactive: true,
+            layout_manager: new Clutter.BinLayout(),
+        });
+        this._volTrack = new St.Widget({
+            style_class: 'zenhush-vol-track',
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._volFill = new St.Widget({
+            style_class: 'zenhush-vol-fill',
+            x_align: Clutter.ActorAlign.START,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._volKnob = new St.Widget({
+            style_class: 'zenhush-vol-knob',
+            x_align: Clutter.ActorAlign.START,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._volHit.add_child(this._volTrack);
+        this._volHit.add_child(this._volFill);
+        this._volHit.add_child(this._volKnob);
+
+        this._volHit.connect('notify::allocation', () => {
+            this._updateVolumeBar(this._state.volume ?? 70, Boolean(this._state.muted));
+        });
+        this._volHit.connect('button-press-event', (_a, ev) => {
+            this._draggingVol = true;
+            this._applyVolPointer(ev);
+            return Clutter.EVENT_STOP;
+        });
+        this._volHit.connect('motion-event', (_a, ev) => {
+            if (this._draggingVol) {
+                this._applyVolPointer(ev);
+                return Clutter.EVENT_STOP;
+            }
+            return Clutter.EVENT_PROPAGATE;
+        });
+        this._volHit.connect('button-release-event', () => {
+            this._draggingVol = false;
+            return Clutter.EVENT_STOP;
+        });
+        this._volHit.connect('leave-event', () => {
+            this._draggingVol = false;
+            return Clutter.EVENT_PROPAGATE;
+        });
+        this._volHit.connect('scroll-event', (_a, ev) => {
+            const dir = ev.get_scroll_direction();
+            let d = 0;
+            if (dir === Clutter.ScrollDirection.UP) d = 5;
+            else if (dir === Clutter.ScrollDirection.DOWN) d = -5;
+            if (d !== 0) {
+                const next = Math.max(0, Math.min(100, (this._state.volume ?? 70) + d));
+                this._callCtrl('SetVolumePct', new GLib.Variant('(y)', [next]));
+                return Clutter.EVENT_STOP;
+            }
+            return Clutter.EVENT_PROPAGATE;
+        });
+
+        this._volPctLabel = new St.Label({
+            text: '70%',
+            style_class: 'zenhush-vol-pct',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+
+        volRow.add_child(this._muteBtn);
+        volRow.add_child(this._volHit);
+        volRow.add_child(this._volPctLabel);
+        root.add_child(volRow);
+
+        // 4. Homogeneous 2-Column Actions Row: Timer + Your File
+        const actRow = new St.Widget({
+            x_expand: true,
+            layout_manager: new Clutter.BoxLayout({
+                orientation: Clutter.Orientation.HORIZONTAL,
+                homogeneous: true,
+                spacing: 8,
+            }),
+        });
+        this._timerBtn = new St.Button({
+            label: 'Timer · Off',
+            style_class: 'zenhush-action-pill',
+            x_expand: true,
+        });
+        this._timerBtn.connect('clicked', () => this._callCtrl('CycleTimer', null));
+
+        this._pickFileBtn = new St.Button({
+            label: '+ Your File',
+            style_class: 'zenhush-action-pill',
+            x_expand: true,
+        });
+        this._pickFileBtn.connect('clicked', () => {
+            this.menu.close();
+            this._callCtrl('PickFile', null);
+        });
+
+        actRow.add_child(this._timerBtn);
+        actRow.add_child(this._pickFileBtn);
+        root.add_child(actRow);
+
+        // 5. Loaded Local File Strip (shown when a local file exists)
+        this._fileRow = new St.BoxLayout({
+            style_class: 'zenhush-file-row',
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._fileSelectBtn = new St.Button({
+            label: 'Local Track',
+            style_class: 'zenhush-file-name',
+            x_expand: true,
+            x_align: Clutter.ActorAlign.START,
+        });
+        this._fileSelectBtn.connect('clicked', () => this._callCtrl('SelectFile', null));
+
+        this._lockBtn = new St.Button({
+            label: 'Lock',
+            style_class: 'zenhush-lock-pill',
+        });
+        this._lockBtn.connect('clicked', () => this._callCtrl('ToggleLockDefault', null));
+
+        const clearIcon = new St.Icon({icon_name: 'window-close-symbolic', icon_size: 13});
+        this._clearFileBtn = new St.Button({
+            style_class: 'zenhush-icon-btn',
+            child: clearIcon,
+        });
+        this._clearFileBtn.connect('clicked', () => this._callCtrl('RemoveFile', null));
+
+        this._fileRow.add_child(this._fileSelectBtn);
+        this._fileRow.add_child(this._lockBtn);
+        this._fileRow.add_child(this._clearFileBtn);
+        root.add_child(this._fileRow);
+
+        // 6. Quiet Footer: Autostart + Quit
+        const footer = new St.BoxLayout({style_class: 'zenhush-footer', x_expand: true});
+        this._autostartBtn = new St.Button({
+            label: 'Autostart: Off',
+            style_class: 'zenhush-footer-link',
+            x_expand: true,
+            x_align: Clutter.ActorAlign.START,
+        });
+        this._autostartBtn.connect('clicked', () => this._callCtrl('ToggleAutostart', null));
+
+        const quitBtn = new St.Button({
+            label: 'Quit',
+            style_class: 'zenhush-footer-link',
+            x_align: Clutter.ActorAlign.END,
+        });
+        quitBtn.connect('clicked', () => {
+            this.menu.close();
+            this._callCtrl('Quit', null);
+        });
+
+        footer.add_child(this._autostartBtn);
+        footer.add_child(quitBtn);
+        root.add_child(footer);
+
+        containerItem.add_child(root);
+        this.menu.addMenuItem(containerItem);
+    }
+
+    _applyVolPointer(event) {
+        const [ex] = event.get_coords();
+        const [tx] = this._volHit.get_transformed_position();
+        const knobW = 12;
+        const usable = Math.max(1, this._volHit.width - knobW);
+        const pct = Math.round(Math.max(0, Math.min(1, (ex - tx - knobW * 0.5) / usable)) * 100);
+        this._updateVolumeBar(pct, false);
+        this._callCtrl('SetVolumePct', new GLib.Variant('(y)', [pct]));
+    }
+
+    _updateVolumeBar(pct, muted) {
+        const w = this._volHit.width;
+        if (w <= 1) return;
+        const knobW = 12;
+        const clamped = muted ? 0 : Math.max(0, Math.min(100, pct));
+        const knobX = Math.round(((w - knobW) * clamped) / 100);
+        this._volFill.width = Math.max(knobW * 0.5, knobX + knobW * 0.5);
+        this._volFill.style_class = muted ? 'zenhush-vol-fill muted' : 'zenhush-vol-fill';
+        this._volKnob.translation_x = knobX;
+        this._volKnob.style_class = muted ? 'zenhush-vol-knob muted' : 'zenhush-vol-knob';
+        this._volPctLabel.text = muted ? 'Mute' : `${pct}%`;
+        this._muteIcon.icon_name = muted ? 'audio-volume-muted-symbolic' : 'audio-volume-high-symbolic';
+        this._muteBtn.style_class = muted ? 'zenhush-icon-btn active' : 'zenhush-icon-btn';
+    }
+
+    applyState(st) {
+        this._state = st;
+        this.visible = true;
+
+        // Top bar pill
+        this._pill.style_class = st.playing ? 'zenhush-panel-pill playing' : 'zenhush-panel-pill';
+        this._dot.visible = Boolean(st.playing);
+        if (st.playing) {
+            const rem = st.timer_remaining_secs;
+            const titleShort = trunc(st.title, 15);
+            this._panelLabel.text = rem && rem > 0 ? `${titleShort} · ${fmtTime(rem)}` : titleShort;
+        } else {
+            this._panelLabel.text = 'Zenhush';
+        }
+
+        // Hero
+        this._titleLabel.text = trunc(st.title, 20);
+        if (st.audio_error) {
+            this._subtitleLabel.text = trunc(st.audio_error, 28);
+            this._subtitleLabel.style_class = 'zenhush-subtitle error';
+        } else {
+            const stateStr = st.playing ? 'Playing' : (st.has_played ? 'Paused' : 'Ready');
+            this._subtitleLabel.text = `${st.subtitle} · ${stateStr}`;
+            this._subtitleLabel.style_class = 'zenhush-subtitle';
+        }
+        this._playIcon.icon_name = st.playing
+            ? 'media-playback-pause-symbolic'
+            : 'media-playback-start-symbolic';
+
+        // Sound Grid
+        for (let i = 0; i < this._soundBtns.length; i++) {
+            const active = !st.is_file && st.sound_idx === i;
+            this._soundBtns[i].style_class = active ? 'zenhush-chip active' : 'zenhush-chip';
+        }
+
+        // Volume
+        this._updateVolumeBar(st.volume, st.muted);
+
+        // Timer button
+        if (st.timer_remaining_secs && st.timer_remaining_secs > 0) {
+            this._timerBtn.label = `Timer · ${fmtTime(st.timer_remaining_secs)}`;
+            this._timerBtn.style_class = 'zenhush-action-pill active';
+        } else if (st.timer_minutes > 0) {
+            this._timerBtn.label = `Timer · ${st.timer_minutes}m`;
+            this._timerBtn.style_class = 'zenhush-action-pill active';
+        } else {
+            this._timerBtn.label = 'Timer · Off';
+            this._timerBtn.style_class = 'zenhush-action-pill';
+        }
+
+        // File row
+        this._fileRow.visible = Boolean(st.has_file);
+        if (st.has_file) {
+            this._fileRow.style_class = st.is_file ? 'zenhush-file-row active' : 'zenhush-file-row';
+            this._fileSelectBtn.label = trunc(st.file_title || 'Local Audio', 21);
+            this._lockBtn.label = st.locked_default ? 'Locked' : 'Lock';
+            this._lockBtn.style_class = st.locked_default ? 'zenhush-lock-pill locked' : 'zenhush-lock-pill';
+        }
+
+        // Autostart
+        this._autostartBtn.label = st.autostart ? 'Autostart: On' : 'Autostart: Off';
+    }
+
+    _callPlayer(method) {
+        Gio.DBus.session.call(
+            BUS_NAME, OBJ_PATH, PLAYER_IFACE, method,
+            null, null, Gio.DBusCallFlags.NONE, -1, null, null
+        );
+    }
+
+    _callCtrl(method, params) {
+        Gio.DBus.session.call(
+            BUS_NAME, OBJ_PATH, CTRL_IFACE, method,
+            params, null, Gio.DBusCallFlags.NONE, -1, null, null
+        );
+    }
+});
+
+export default class ZenhushTopBarExtension extends Extension {
+    enable() {
+        this._indicator = new ZenhushIndicator(this.path);
+        Main.panel.addToStatusArea(this.uuid, this._indicator, 0, 'right');
 
         this._propSub = Gio.DBus.session.signal_subscribe(
             BUS_NAME,
-            'org.freedesktop.DBus.Properties',
+            PROPS_IFACE,
             'PropertiesChanged',
             OBJ_PATH,
             null,
             Gio.DBusSignalFlags.NONE,
             () => this._refresh()
+        );
+        this._toggleSub = Gio.DBus.session.signal_subscribe(
+            BUS_NAME,
+            CTRL_IFACE,
+            'TogglePopover',
+            OBJ_PATH,
+            null,
+            Gio.DBusSignalFlags.NONE,
+            () => {
+                if (this._indicator) {
+                    this._indicator.visible = true;
+                    this._indicator.menu.toggle();
+                }
+            }
         );
         this._ownerSub = Gio.DBus.session.signal_subscribe(
             'org.freedesktop.DBus',
@@ -122,48 +740,34 @@ export default class ZenhushPillExtension extends Extension {
             Gio.DBusSignalFlags.NONE,
             () => this._refresh()
         );
-        this._volume = 0.7;
+
+        this._menuOpenSub = this._indicator.menu.connect('open-state-changed', (_m, open) => {
+            if (open) this._refresh();
+        });
+
         this._refresh();
-    }
-
-    _callPlayer(method) {
-        Gio.DBus.session.call(BUS_NAME, OBJ_PATH, PLAYER_IFACE, method, null, null, Gio.DBusCallFlags.NONE, -1, null, null);
-    }
-
-    _callRoot(method) {
-        Gio.DBus.session.call(BUS_NAME, OBJ_PATH, ROOT_IFACE, method, null, null, Gio.DBusCallFlags.NONE, -1, null, () => {});
-    }
-
-    _adjustVolume(delta) {
-        const next = Math.max(0.0, Math.min(1.0, (this._volume || 0.7) + delta));
-        this._volume = next;
-        const val = new GLib.Variant('d', next);
-        Gio.DBus.session.call(
-            BUS_NAME, OBJ_PATH, 'org.freedesktop.DBus.Properties', 'Set',
-            new GLib.Variant('(ssv)', [PLAYER_IFACE, 'Volume', val]),
-            null, Gio.DBusCallFlags.NONE, -1, null, null
-        );
     }
 
     _refresh() {
         Gio.DBus.session.call(
-            BUS_NAME, OBJ_PATH, 'org.freedesktop.DBus.Properties', 'GetAll',
-            new GLib.Variant('(s)', [PLAYER_IFACE]),
-            null, Gio.DBusCallFlags.NONE, -1, null,
+            BUS_NAME,
+            OBJ_PATH,
+            PROPS_IFACE,
+            'Get',
+            new GLib.Variant('(ss)', [CTRL_IFACE, 'StateJson']),
+            null,
+            Gio.DBusCallFlags.NONE,
+            -1,
+            null,
             (conn, res) => {
+                if (!this._indicator) return;
                 try {
-                    const [props] = conn.call_finish(res).deep_unpack();
-                    const status = props.PlaybackStatus ? props.PlaybackStatus.deep_unpack() : 'Stopped';
-                    const meta = props.Metadata ? props.Metadata.deep_unpack() : {};
-                    const title = meta['xesam:title'] ? meta['xesam:title'].deep_unpack() : 'Zenhush';
-                    if (props.Volume) this._volume = props.Volume.deep_unpack();
-                    const playing = status === 'Playing';
-                    this._btn.visible = true;
-                    this._box.style_class = playing ? 'zenhush-pill playing' : 'zenhush-pill';
-                    const shortTitle = title.length > 18 ? title.slice(0, 17) + '…' : title;
-                    this._label.text = playing ? shortTitle : 'Zenhush';
+                    const [variant] = conn.call_finish(res).deep_unpack();
+                    const jsonStr = variant.deep_unpack();
+                    const st = JSON.parse(jsonStr);
+                    this._indicator.applyState(st);
                 } catch (_e) {
-                    this._btn.visible = false;
+                    this._indicator.visible = false;
                 }
             }
         );
@@ -171,10 +775,12 @@ export default class ZenhushPillExtension extends Extension {
 
     disable() {
         if (this._propSub) Gio.DBus.session.signal_unsubscribe(this._propSub);
+        if (this._toggleSub) Gio.DBus.session.signal_unsubscribe(this._toggleSub);
         if (this._ownerSub) Gio.DBus.session.signal_unsubscribe(this._ownerSub);
-        if (this._btn) {
-            this._btn.destroy();
-            this._btn = null;
+        if (this._indicator) {
+            if (this._menuOpenSub) this._indicator.menu.disconnect(this._menuOpenSub);
+            this._indicator.destroy();
+            this._indicator = null;
         }
     }
 }
@@ -188,27 +794,173 @@ export default class ZenhushPillExtension extends Extension {
         ext_dir().map(|d| d.join("extension.js").exists()).unwrap_or(false)
     }
 
+    fn installed_version() -> u32 {
+        let Some(dir) = ext_dir() else {
+            return 0;
+        };
+        let Ok(text) = fs::read_to_string(dir.join("metadata.json")) else {
+            return 0;
+        };
+        serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("version")?.as_u64())
+            .map(|n| n as u32)
+            .unwrap_or(0)
+    }
+
+    pub fn is_active() -> bool {
+        let Ok(conn) = zbus::blocking::Connection::session() else {
+            return false;
+        };
+        let Ok(msg) = conn.call_method(
+            Some("org.gnome.Shell.Extensions"),
+            "/org/gnome/Shell/Extensions",
+            Some("org.gnome.Shell.Extensions"),
+            "GetExtensionInfo",
+            &(UUID,),
+        ) else {
+            return false;
+        };
+        let Ok(info) = msg.body().deserialize::<HashMap<String, OwnedValue>>() else {
+            return false;
+        };
+        if let Some(state_val) = info.get("state") {
+            if let Ok(state) = f64::try_from(state_val.clone()) {
+                return (state - 1.0).abs() < 0.01;
+            }
+            if let Ok(state) = i32::try_from(state_val.clone()) {
+                return state == 1;
+            }
+        }
+        false
+    }
+
+    pub fn ensure_installed_and_enabled() {
+        let needs_write = !is_installed() || installed_version() < EXT_VERSION;
+        if needs_write {
+            let _ = install_gnome_pill();
+        } else if !is_active() {
+            let _ = enable_extension_dbus();
+        }
+    }
+
+    fn ensure_gsettings_enabled() {
+        let Ok(out) = Command::new("gsettings")
+            .args(["get", "org.gnome.shell", "enabled-extensions"])
+            .output()
+        else {
+            return;
+        };
+        let raw = String::from_utf8_lossy(&out.stdout);
+        let mut items: Vec<String> = raw
+            .split('\'')
+            .enumerate()
+            .filter_map(|(i, s)| if i % 2 == 1 { Some(s.to_string()) } else { None })
+            .collect();
+        if !items.iter().any(|x| x == UUID) {
+            items.push(UUID.to_string());
+            let literal = format!(
+                "[{}]",
+                items
+                    .iter()
+                    .map(|x| format!("'{}'", x))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let _ = Command::new("gsettings")
+                .args(["set", "org.gnome.shell", "enabled-extensions", &literal])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+
+    fn enable_extension_dbus() -> bool {
+        ensure_gsettings_enabled();
+        if let Ok(conn) = zbus::blocking::Connection::session() {
+            let _ = conn.call_method(
+                Some("org.gnome.Shell.Extensions"),
+                "/org/gnome/Shell/Extensions",
+                Some("org.gnome.Shell.Extensions"),
+                "ReloadExtension",
+                &(UUID,),
+            );
+            if let Ok(reply) = conn.call_method(
+                Some("org.gnome.Shell.Extensions"),
+                "/org/gnome/Shell/Extensions",
+                Some("org.gnome.Shell.Extensions"),
+                "EnableExtension",
+                &(UUID,),
+            ) {
+                if let Ok(ok) = reply.body().deserialize::<bool>() {
+                    if ok {
+                        return true;
+                    }
+                }
+            }
+        }
+        Command::new("gnome-extensions")
+            .args(["enable", UUID])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
     pub fn install_gnome_pill() -> Result<String, String> {
         let dir = ext_dir().ok_or("No local data dir")?;
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         fs::write(dir.join("metadata.json"), METADATA_JSON).map_err(|e| e.to_string())?;
         fs::write(dir.join("stylesheet.css"), STYLESHEET_CSS).map_err(|e| e.to_string())?;
-        // Ensure GLib is imported cleanly in extension.js
-        let js = format!("import GLib from 'gi://GLib';\n{}", EXTENSION_JS);
-        fs::write(dir.join("extension.js"), js).map_err(|e| e.to_string())?;
+        fs::write(dir.join("extension.js"), EXTENSION_JS).map_err(|e| e.to_string())?;
+        fs::write(dir.join("zenhush-symbolic.svg"), SYMBOLIC_SVG).map_err(|e| e.to_string())?;
 
-        let _ = Command::new("gnome-extensions").args(["enable", UUID]).status();
-        Ok("Installed GNOME Top-Bar Pill (re-login or toggle Extensions if needed)".to_string())
+        let enabled = enable_extension_dbus();
+        if enabled && is_active() {
+            Ok("GNOME Top-Bar Popover active right in your top bar!".to_string())
+        } else {
+            Ok("Installed GNOME Top-Bar Popover (log out & back in once to activate)".to_string())
+        }
     }
 
     pub fn uninstall_gnome_pill() -> Result<String, String> {
-        let _ = Command::new("gnome-extensions").args(["disable", UUID]).status();
+        let _ = Command::new("gnome-extensions")
+            .args(["disable", UUID])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if let Ok(out) = Command::new("gsettings")
+            .args(["get", "org.gnome.shell", "enabled-extensions"])
+            .output()
+        {
+            let raw = String::from_utf8_lossy(&out.stdout);
+            let filtered: Vec<String> = raw
+                .split('\'')
+                .enumerate()
+                .filter_map(|(i, s)| if i % 2 == 1 { Some(s.to_string()) } else { None })
+                .filter(|x| x != UUID)
+                .collect();
+            let literal = format!(
+                "[{}]",
+                filtered
+                    .iter()
+                    .map(|x| format!("'{}'", x))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let _ = Command::new("gsettings")
+                .args(["set", "org.gnome.shell", "enabled-extensions", &literal])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
         if let Some(dir) = ext_dir() {
             if dir.exists() {
                 fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
             }
         }
-        Ok("Removed GNOME Top-Bar Pill extension".to_string())
+        Ok("Removed GNOME Top-Bar Popover extension".to_string())
     }
 }
 
@@ -217,15 +969,23 @@ mod fallback {
     pub fn is_installed() -> bool {
         false
     }
+    pub fn is_active() -> bool {
+        false
+    }
+    pub fn ensure_installed_and_enabled() {}
     pub fn install_gnome_pill() -> Result<String, String> {
-        Err("GNOME Top-Bar Pill is Linux GNOME-only".into())
+        Err("GNOME Top-Bar Popover is Linux GNOME-only".into())
     }
     pub fn uninstall_gnome_pill() -> Result<String, String> {
-        Err("GNOME Top-Bar Pill is Linux GNOME-only".into())
+        Err("GNOME Top-Bar Popover is Linux GNOME-only".into())
     }
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{install_gnome_pill, is_installed, uninstall_gnome_pill};
+pub use linux::{
+    ensure_installed_and_enabled, install_gnome_pill, is_active, is_installed, uninstall_gnome_pill,
+};
 #[cfg(not(target_os = "linux"))]
-pub use fallback::{install_gnome_pill, is_installed, uninstall_gnome_pill};
+pub use fallback::{
+    ensure_installed_and_enabled, install_gnome_pill, is_active, is_installed, uninstall_gnome_pill,
+};

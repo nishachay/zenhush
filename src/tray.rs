@@ -20,13 +20,12 @@ pub enum TrayEvent {
     PrevSound,
     SelectSound(Sound),
     SelectFile,
+    PickFile,
     ToggleLockDefault,
     SetVolume(u8),
     VolumeStep(i8),
     ToggleMute,
     SetTimer(u32),
-    ToggleNotch,
-    TogglePin,
     Quit,
 }
 
@@ -278,6 +277,17 @@ mod platform {
                     .into(),
                 );
             }
+            sound_items.push(MenuItem::Separator);
+            sound_items.push(
+                StandardItem {
+                    label: "Choose Audio File…".into(),
+                    activate: Box::new(move |this: &mut Self| {
+                        this.emit(TrayEvent::PickFile);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
 
             items.push(
                 SubMenu {
@@ -364,35 +374,11 @@ mod platform {
             items.push(MenuItem::Separator);
 
             items.push(
-                CheckmarkItem {
-                    label: "Notch Pill Mode".into(),
-                    checked: st.notch_mode,
-                    activate: Box::new(move |this: &mut Self| {
-                        this.emit(TrayEvent::ToggleNotch);
-                    }),
-                    ..Default::default()
-                }
-                .into(),
-            );
-
-            items.push(
-                CheckmarkItem {
-                    label: "Pin Window Open".into(),
-                    checked: st.pinned,
-                    activate: Box::new(move |this: &mut Self| {
-                        this.emit(TrayEvent::TogglePin);
-                    }),
-                    ..Default::default()
-                }
-                .into(),
-            );
-
-            items.push(
                 StandardItem {
                     label: if st.visible {
-                        "Hide Zenhush".into()
+                        "Hide Controls".into()
                     } else {
-                        "Show Zenhush".into()
+                        "Open Controls".into()
                     },
                     activate: Box::new(move |this: &mut Self| {
                         this.emit(TrayEvent::ToggleWindow);
@@ -484,16 +470,16 @@ mod platform {
             let active_icon = to_tray_icon(true);
 
             let menu = Menu::new();
-            let item_show = MenuItem::with_id("show", "Show / Hide Zenhush", true, None);
+            let item_show = MenuItem::with_id("show", "Open / Hide Zenhush", true, None);
             let item_play = MenuItem::with_id("play", "Play / Pause", true, None);
             let item_next = MenuItem::with_id("next", "Next Sound", true, None);
-            let item_notch = MenuItem::with_id("notch", "Toggle Notch Pill", true, None);
+            let item_pick = MenuItem::with_id("pick", "Choose Audio File…", true, None);
             let item_quit = MenuItem::with_id("quit", "Quit Zenhush", true, None);
             let _ = menu.append_items(&[
                 &item_play,
                 &item_next,
+                &item_pick,
                 &PredefinedMenuItem::separator(),
-                &item_notch,
                 &item_show,
                 &PredefinedMenuItem::separator(),
                 &item_quit,
@@ -534,7 +520,7 @@ mod platform {
                         "show" => Some(TrayEvent::ToggleWindow),
                         "play" => Some(TrayEvent::TogglePlay),
                         "next" => Some(TrayEvent::NextSound),
-                        "notch" => Some(TrayEvent::ToggleNotch),
+                        "pick" => Some(TrayEvent::PickFile),
                         "quit" => Some(TrayEvent::Quit),
                         _ => None,
                     };

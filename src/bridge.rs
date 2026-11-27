@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::settings::{DockAnchor, LocalTrack, ThemeMode, WindowMode};
 use crate::synth::{FileTone, Sound};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UiSnapshot {
     pub playing: bool,
     pub has_played: bool,
@@ -48,6 +48,7 @@ pub struct UiSnapshot {
     pub start_in_background: bool,
     pub autostart_enabled: bool,
     pub gnome_pill_installed: bool,
+    pub gnome_popover_active: bool,
     pub global_shortcut_toggle: String,
     pub global_shortcut_play: String,
     pub shortcut_status: String,

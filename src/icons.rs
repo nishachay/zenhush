@@ -21,6 +21,8 @@ pub enum IconKind {
     Trash,
     Close,
     Sliders,
+    FolderOpen,
+    Timer,
 }
 
 impl IconKind {
@@ -41,6 +43,8 @@ impl IconKind {
             IconKind::Trash => include_str!("../assets/icons/trash-2.svg"),
             IconKind::Close => include_str!("../assets/icons/x.svg"),
             IconKind::Sliders => include_str!("../assets/icons/sliders-horizontal.svg"),
+            IconKind::FolderOpen => include_str!("../assets/icons/folder-open.svg"),
+            IconKind::Timer => include_str!("../assets/icons/timer.svg"),
         }
     }
 

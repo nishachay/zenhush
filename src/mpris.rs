@@ -1,7 +1,8 @@
-//! MPRIS2 D-Bus media player interface (`org.mpris.MediaPlayer2.zenhush`).
+//! MPRIS2 D-Bus media player + `org.zenhush.Control` native top-bar interface.
 //!
 //! Enables hardware Play/Pause/Next/Prev media keys, `playerctl`, and
-//! GNOME/KDE top-bar media widgets to view and control Zenhush natively.
+//! our native GNOME Shell Top-Bar Popover extension to view and control Zenhush
+//! directly over D-Bus with zero OpenGL windows or polling overhead.
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -10,6 +11,7 @@ mod linux {
     use std::sync::{Arc, Mutex};
     use std::thread::Thread;
 
+    use serde::Serialize;
     use zbus::blocking::Connection;
     use zbus::interface;
     use zbus::object_server::SignalEmitter;
@@ -26,16 +28,34 @@ mod linux {
         Next,
         Previous,
         SetVolume(u8),
+        SelectSound(u32),
+        SelectFile,
+        PickFile,
+        ToggleLockDefault,
+        RemoveFile,
+        ToggleMute,
+        CycleTimer,
+        ToggleAutostart,
+        OpenWindow,
     }
 
-    #[derive(Clone, Debug, PartialEq)]
+    #[derive(Clone, Debug, PartialEq, Serialize)]
     pub struct MprisState {
         pub playing: bool,
         pub has_played: bool,
+        pub is_file: bool,
+        pub sound_idx: u32,
         pub title: String,
         pub subtitle: String,
         pub volume: u8,
         pub muted: bool,
+        pub timer_minutes: u32,
+        pub timer_remaining_secs: Option<u64>,
+        pub has_file: bool,
+        pub file_title: String,
+        pub locked_default: bool,
+        pub autostart: bool,
+        pub audio_error: Option<String>,
     }
 
     impl Default for MprisState {
@@ -43,10 +63,19 @@ mod linux {
             MprisState {
                 playing: false,
                 has_played: false,
+                is_file: false,
+                sound_idx: 0,
                 title: "Brown Noise".to_string(),
                 subtitle: "deep and warm".to_string(),
                 volume: 70,
                 muted: false,
+                timer_minutes: 0,
+                timer_remaining_secs: None,
+                has_file: false,
+                file_title: String::new(),
+                locked_default: false,
+                autostart: false,
+                audio_error: None,
             }
         }
     }
@@ -130,6 +159,7 @@ mod linux {
                 w.unpark();
             }
         }
+
         fn build_metadata(st: &MprisState) -> HashMap<String, Value<'static>> {
             let mut m = HashMap::new();
             if let Ok(path) = ObjectPath::try_from("/org/mpris/MediaPlayer2/Track/current") {
@@ -262,15 +292,94 @@ mod linux {
         }
     }
 
+    struct ControlIface {
+        tx: Sender<MprisCmd>,
+        wake: Option<Arc<Thread>>,
+        state_json: Arc<Mutex<String>>,
+    }
+
+    impl ControlIface {
+        fn send(&self, cmd: MprisCmd) {
+            let _ = self.tx.send(cmd);
+            if let Some(ref w) = self.wake {
+                w.unpark();
+            }
+        }
+    }
+
+    #[interface(name = "org.zenhush.Control")]
+    impl ControlIface {
+        #[zbus(property)]
+        fn state_json(&self) -> String {
+            self.state_json
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_else(|_| "{}".to_string())
+        }
+
+        fn select_sound(&self, idx: u32) {
+            self.send(MprisCmd::SelectSound(idx));
+        }
+
+        fn select_file(&self) {
+            self.send(MprisCmd::SelectFile);
+        }
+
+        fn pick_file(&self) {
+            self.send(MprisCmd::PickFile);
+        }
+
+        fn toggle_lock_default(&self) {
+            self.send(MprisCmd::ToggleLockDefault);
+        }
+
+        fn remove_file(&self) {
+            self.send(MprisCmd::RemoveFile);
+        }
+
+        fn set_volume_pct(&self, pct: u8) {
+            self.send(MprisCmd::SetVolume(pct.min(100)));
+        }
+
+        fn toggle_mute(&self) {
+            self.send(MprisCmd::ToggleMute);
+        }
+
+        fn cycle_timer(&self) {
+            self.send(MprisCmd::CycleTimer);
+        }
+
+        fn toggle_autostart(&self) {
+            self.send(MprisCmd::ToggleAutostart);
+        }
+
+        fn open_window(&self) {
+            self.send(MprisCmd::OpenWindow);
+        }
+
+        fn quit(&self) {
+            self.send(MprisCmd::Quit);
+        }
+
+        #[zbus(signal)]
+        async fn toggle_popover(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+    }
+
     pub struct MprisServer {
         conn: Connection,
         state: Arc<Mutex<MprisState>>,
+        state_json: Arc<Mutex<String>>,
         last: Mutex<MprisState>,
+        last_json: Mutex<String>,
     }
 
     impl MprisServer {
         pub fn start(tx: Sender<MprisCmd>, wake: Option<Arc<Thread>>) -> Option<Self> {
-            let state = Arc::new(Mutex::new(MprisState::default()));
+            let initial = MprisState::default();
+            let initial_json = serde_json::to_string(&initial).unwrap_or_else(|_| "{}".to_string());
+            let state = Arc::new(Mutex::new(initial.clone()));
+            let state_json = Arc::new(Mutex::new(initial_json.clone()));
+
             let builder = match zbus::blocking::connection::Builder::session() {
                 Ok(b) => b,
                 Err(e) => {
@@ -301,14 +410,28 @@ mod linux {
             let builder = match builder.serve_at(
                 "/org/mpris/MediaPlayer2",
                 PlayerIface {
-                    tx,
-                    wake,
+                    tx: tx.clone(),
+                    wake: wake.clone(),
                     state: state.clone(),
                 },
             ) {
                 Ok(b) => b,
                 Err(e) => {
                     eprintln!("zenhush mpris player serve_at error: {}", e);
+                    return None;
+                }
+            };
+            let builder = match builder.serve_at(
+                "/org/mpris/MediaPlayer2",
+                ControlIface {
+                    tx,
+                    wake,
+                    state_json: state_json.clone(),
+                },
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("zenhush control serve_at error: {}", e);
                     return None;
                 }
             };
@@ -323,8 +446,23 @@ mod linux {
             Some(MprisServer {
                 conn,
                 state,
-                last: Mutex::new(MprisState::default()),
+                state_json,
+                last: Mutex::new(initial),
+                last_json: Mutex::new(initial_json),
             })
+        }
+
+        pub fn emit_toggle_popover(&self) {
+            if let Ok(iface_ref) = self
+                .conn
+                .object_server()
+                .interface::<_, ControlIface>("/org/mpris/MediaPlayer2")
+            {
+                let emitter = SignalEmitter::from(iface_ref.signal_emitter().clone());
+                let _ = zbus::block_on(async {
+                    let _ = ControlIface::toggle_popover(&emitter).await;
+                });
+            }
         }
 
         pub fn sync(&self, next: &MprisState) {
@@ -344,24 +482,55 @@ mod linux {
                 *g = next.clone();
             }
 
-            if let Ok(iface_ref) = self
-                .conn
-                .object_server()
-                .interface::<_, PlayerIface>("/org/mpris/MediaPlayer2")
-            {
-                let emitter = SignalEmitter::from(iface_ref.signal_emitter().clone());
-                let player = iface_ref.get();
-                let _ = zbus::block_on(async {
-                    if status_changed {
-                        let _ = player.playback_status_changed(&emitter).await;
+            let next_json = serde_json::to_string(next).unwrap_or_else(|_| "{}".to_string());
+            let json_changed = if let Ok(mut prev_j) = self.last_json.lock() {
+                if *prev_j != next_json {
+                    *prev_j = next_json.clone();
+                    if let Ok(mut gj) = self.state_json.lock() {
+                        *gj = next_json;
                     }
-                    if meta_changed {
-                        let _ = player.metadata_changed(&emitter).await;
-                    }
-                    if vol_changed {
-                        let _ = player.volume_changed(&emitter).await;
-                    }
-                });
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if status_changed || meta_changed || vol_changed {
+                if let Ok(iface_ref) = self
+                    .conn
+                    .object_server()
+                    .interface::<_, PlayerIface>("/org/mpris/MediaPlayer2")
+                {
+                    let emitter = SignalEmitter::from(iface_ref.signal_emitter().clone());
+                    let player = iface_ref.get();
+                    let _ = zbus::block_on(async {
+                        if status_changed {
+                            let _ = player.playback_status_changed(&emitter).await;
+                        }
+                        if meta_changed {
+                            let _ = player.metadata_changed(&emitter).await;
+                        }
+                        if vol_changed {
+                            let _ = player.volume_changed(&emitter).await;
+                        }
+                    });
+                }
+            }
+
+            if json_changed {
+                if let Ok(iface_ref) = self
+                    .conn
+                    .object_server()
+                    .interface::<_, ControlIface>("/org/mpris/MediaPlayer2")
+                {
+                    let emitter = SignalEmitter::from(iface_ref.signal_emitter().clone());
+                    let ctrl = iface_ref.get();
+                    let _ = zbus::block_on(async {
+                        let _ = ctrl.state_json_changed(&emitter).await;
+                    });
+                }
             }
         }
     }
@@ -383,16 +552,34 @@ mod fallback {
         Next,
         Previous,
         SetVolume(u8),
+        SelectSound(u32),
+        SelectFile,
+        PickFile,
+        ToggleLockDefault,
+        RemoveFile,
+        ToggleMute,
+        CycleTimer,
+        ToggleAutostart,
+        OpenWindow,
     }
 
     #[derive(Clone, Debug, PartialEq, Default)]
     pub struct MprisState {
         pub playing: bool,
         pub has_played: bool,
+        pub is_file: bool,
+        pub sound_idx: u32,
         pub title: String,
         pub subtitle: String,
         pub volume: u8,
         pub muted: bool,
+        pub timer_minutes: u32,
+        pub timer_remaining_secs: Option<u64>,
+        pub has_file: bool,
+        pub file_title: String,
+        pub locked_default: bool,
+        pub autostart: bool,
+        pub audio_error: Option<String>,
     }
 
     pub struct MprisServer;
@@ -400,6 +587,7 @@ mod fallback {
         pub fn start(_tx: Sender<MprisCmd>, _wake: Option<Arc<std::thread::Thread>>) -> Option<Self> {
             None
         }
+        pub fn emit_toggle_popover(&self) {}
         pub fn sync(&self, _next: &MprisState) {}
     }
 }

@@ -40,6 +40,7 @@ pub struct AudioEngine {
     device_name: String,
     sample_rate: u32,
     last_device_poll: Instant,
+    rebuild_backoff_secs: u64,
     cmd_tx: Sender<AudioCmd>,
     rms_rx: rtrb::Consumer<f32>,
     pause_fade_done: Arc<AtomicBool>,
@@ -74,6 +75,7 @@ impl AudioEngine {
             device_name: String::new(),
             sample_rate: DEFAULT_SAMPLE_RATE,
             last_device_poll: Instant::now(),
+            rebuild_backoff_secs: 4,
             cmd_tx,
             rms_rx,
             pause_fade_done,
@@ -236,18 +238,19 @@ impl AudioEngine {
                     }
                 },
                 move |err| {
+                    let _ = err;
                     if let Ok(mut slot) = err_clone.lock() {
-                        *slot = Some(format!("Audio error ({})", err));
+                        *slot = Some("Audio device unavailable".to_string());
                     }
                 },
                 None,
             )
-            .map_err(|e| format!("No audio device ({})", e))?;
+            .map_err(|_| "No audio device".to_string())?;
 
         if self.playing {
             stream
                 .play()
-                .map_err(|e| format!("No audio device ({})", e))?;
+                .map_err(|_| "No audio device".to_string())?;
             self.stream_paused = false;
         } else {
             self.stream_paused = true;
@@ -290,8 +293,14 @@ impl AudioEngine {
             }
         }
 
-        // Only poll default device hotplugs while actively playing (0% idle CPU when paused)
-        if !self.playing || self.last_device_poll.elapsed() < Duration::from_secs(1) {
+        // Poll default output device at a gentle cadence with backoff on errors
+        // so missing/virtual devices never spin ALSA/PipeWire every second.
+        let poll_interval = if self.stream.is_none() || self.audio_error().is_some() {
+            Duration::from_secs(self.rebuild_backoff_secs)
+        } else {
+            Duration::from_secs(4)
+        };
+        if !self.playing || self.last_device_poll.elapsed() < poll_interval {
             return;
         }
         self.last_device_poll = Instant::now();
@@ -301,10 +310,21 @@ impl AudioEngine {
                 .description()
                 .map(|x| x.name().to_string())
                 .unwrap_or_default(),
-            Err(_) => return,
+            Err(_) => {
+                self.rebuild_backoff_secs = (self.rebuild_backoff_secs * 2).min(30);
+                return;
+            }
         };
-        if current != self.device_name || self.stream.is_none() {
-            self.rebuild_stream();
+        let needs_rebuild =
+            self.stream.is_none() || (!current.is_empty() && current != self.device_name);
+        if needs_rebuild {
+            if self.rebuild_stream() {
+                self.rebuild_backoff_secs = 4;
+            } else {
+                self.rebuild_backoff_secs = (self.rebuild_backoff_secs * 2).min(30);
+            }
+        } else {
+            self.rebuild_backoff_secs = 4;
         }
     }
 
