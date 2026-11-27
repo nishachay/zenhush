@@ -2,8 +2,9 @@
 //!
 //! Used on macOS, Windows, non-GNOME Linux desktops, or on GNOME right after
 //! initial installation before the Top-Bar Popover extension activates.
-//! Connects over `BridgeClient` to the ~15 MB Background Core, sleeps at ~0%
-//! GPU/CPU when paused, and exits cleanly when hidden.
+//! Designed with strict UI/UX craft: WCAG AA contrast (>= 6:1 on accent),
+//! >= 26–44 px hit targets, concentric radii, full keyboard focus rings,
+//! verb-first copy, and ~0% idle GPU/CPU when paused.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -18,15 +19,15 @@ use crate::shortcuts;
 use crate::synth::Sound;
 use crate::theme::{Theme, DARK, LIGHT};
 
-const CARD_W: f32 = 304.0;
+const CARD_W: f32 = 312.0;
 const BAR_COUNT: usize = 8;
 const IDLE_BARS: [f32; BAR_COUNT] = [0.35, 0.60, 0.80, 0.55, 0.90, 0.65, 0.45, 0.30];
 const TIMER_CYCLE: [(u32, &str); 5] = [
-    (0, "Timer"),
-    (25, "25m"),
-    (45, "45m"),
-    (60, "60m"),
-    (90, "90m"),
+    (0, "Timer: Off"),
+    (25, "Timer: 25m"),
+    (45, "Timer: 45m"),
+    (60, "Timer: 60m"),
+    (90, "Timer: 90m"),
 ];
 
 fn bold_font(size: f32) -> egui::FontId {
@@ -120,7 +121,7 @@ impl ZenhushUiApp {
             modal_open: false,
             suppress_hide_until: Instant::now() + Duration::from_millis(400),
             anchor_applied: false,
-            last_window_size: [CARD_W, 294.0],
+            last_window_size: [CARD_W, 306.0],
         }
     }
 
@@ -161,6 +162,14 @@ impl ZenhushUiApp {
             .unwrap_or_else(|| "Local File".to_string())
     }
 
+    fn full_title(&self) -> String {
+        if self.snap.is_file_mode {
+            self.active_track_title()
+        } else {
+            self.snap.active_sound.title().to_string()
+        }
+    }
+
     fn display_title(&self) -> String {
         if self.snap.is_file_mode {
             truncate_chars(&self.active_track_title(), 19)
@@ -171,7 +180,7 @@ impl ZenhushUiApp {
 
     fn display_subtitle(&self) -> String {
         if let Some(ref err) = self.snap.audio_error {
-            return truncate_chars(err, 26);
+            return truncate_chars(err, 28);
         }
         if !self.snap.playing && !self.snap.has_played {
             return if self.snap.is_file_mode && self.is_locked_default() {
@@ -206,14 +215,14 @@ impl ZenhushUiApp {
         }
     }
 
-    /// Exact sum of margins + vertical stack so top margin == bottom margin to the pixel:
-    /// outer margin (14+14=28) + topbar (22) + gap (10) + hero card (62) + gap (12)
-    /// + sound grid (28+6+28=62) + gap (12) + vol (26) + gap (10) + actions (28) = 272px
-    /// + active file row (8+30 = 38px) + gnome hint (8+14 = 22px)
+    /// Exact sum of symmetric 14px outer margins + vertical stack:
+    /// 28 (margins) + 28 (top bar) + 12 + 68 (hero) + 14 + 70 (4x2 chips)
+    /// + 14 + 28 (volume) + 12 + 32 (actions) = 306px
+    /// + active file row (10 + 36 = 46px) + gnome hint (8 + 14 = 22px)
     fn target_height(&self) -> f32 {
-        let mut h = 272.0;
+        let mut h = 306.0;
         if self.snap.active_file.is_some() {
-            h += 38.0;
+            h += 46.0;
         }
         if shortcuts::is_gnome() && !self.snap.gnome_popover_active {
             h += 22.0;
@@ -300,6 +309,15 @@ impl ZenhushUiApp {
             if i.key_pressed(Key::T) {
                 actions.push(6);
             }
+            if i.key_pressed(Key::O) {
+                actions.push(8);
+            }
+            if i.key_pressed(Key::L) {
+                actions.push(9);
+            }
+            if i.key_pressed(Key::P) {
+                actions.push(10);
+            }
             if i.key_pressed(Key::Escape) {
                 actions.push(7);
             }
@@ -343,6 +361,16 @@ impl ZenhushUiApp {
                         self.close_popup(ctx);
                     }
                 }
+                8 => self.pick_local_file(),
+                9 => {
+                    if let Some(p) = self.snap.active_file.clone() {
+                        self.send(UiCmd::ToggleLockDefault(p));
+                    }
+                }
+                10 => {
+                    self.snap.pinned = !self.snap.pinned;
+                    self.send(UiCmd::SetPinned(self.snap.pinned));
+                }
                 n if n >= 100 => {
                     let idx = (n - 100) as usize;
                     if let Some(&s) = Sound::ALL.get(idx) {
@@ -382,7 +410,6 @@ impl ZenhushUiApp {
     }
 
     fn render_brand_glyph(&self, painter: &egui::Painter, center: Pos2, color: Color32) {
-        // Mini 3-bar Zenhush wave mark matching our app icon
         let specs = [(-4.0_f32, 6.0_f32), (0.0, 11.0), (4.0, 8.0)];
         for (dx, h) in specs {
             painter.rect_filled(
@@ -394,7 +421,6 @@ impl ZenhushUiApp {
     }
 
     fn render_card(&mut self, ctx: &egui::Context, theme: Theme) {
-        // Scroll anywhere -> smooth volume ±5%
         let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
         if scroll.abs() > 1.5 {
             let step = if scroll > 0.0 { 5i16 } else { -5i16 };
@@ -420,12 +446,12 @@ impl ZenhushUiApp {
             ui.spacing_mut().item_spacing = Vec2::ZERO;
             let avail_w = ui.available_width();
 
-            // 1. Top Bar: Brand Glyph + Wordmark (drag handle) + Pin + Close
+            // 1. Top Bar (28px height, 28x28 hit targets)
             ui.horizontal(|ui| {
-                ui.set_height(22.0);
-                let brand_w = (avail_w - 50.0).max(60.0);
+                ui.set_height(28.0);
+                let brand_w = (avail_w - 60.0).max(60.0);
                 let (drag_rect, drag_resp) =
-                    ui.allocate_exact_size(Vec2::new(brand_w, 22.0), Sense::click_and_drag());
+                    ui.allocate_exact_size(Vec2::new(brand_w, 28.0), Sense::click_and_drag());
                 if drag_resp.drag_started() {
                     self.snap.dock_anchor = DockAnchor::Free;
                     self.send(UiCmd::SetDockAnchor(DockAnchor::Free));
@@ -450,7 +476,7 @@ impl ZenhushUiApp {
                     } else {
                         "ZENHUSH"
                     },
-                    semibold_font(10.0),
+                    semibold_font(11.0),
                     if self.snap.playing {
                         theme.accent_text
                     } else {
@@ -459,7 +485,7 @@ impl ZenhushUiApp {
                 );
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
+                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
                     let close_tip = if self.snap.has_tray {
                         "Hide to top bar (Esc)"
                     } else {
@@ -469,8 +495,8 @@ impl ZenhushUiApp {
                         ui,
                         &mut self.icons,
                         IconKind::Close,
-                        22.0,
-                        13,
+                        28.0,
+                        14,
                         theme.subtext,
                         theme,
                         close_tip,
@@ -486,14 +512,14 @@ impl ZenhushUiApp {
                         ui,
                         &mut self.icons,
                         IconKind::Pin,
-                        22.0,
-                        13,
+                        28.0,
+                        14,
                         pin_color,
                         theme,
                         if self.snap.pinned {
-                            "Unpin window"
+                            "Unpin window (P)"
                         } else {
-                            "Pin window open"
+                            "Pin window open (P)"
                         },
                     ) {
                         self.snap.pinned = !self.snap.pinned;
@@ -502,41 +528,44 @@ impl ZenhushUiApp {
                 });
             });
 
-            ui.add_space(10.0);
+            ui.add_space(12.0);
 
-            // 2. Hero Stage: Warm Recessed Card with Title + Calm 8-Bar Meter + Play Button
+            // 2. Hero Stage: Recessed Warm Container (68px tall, 44x44 Play target)
             let (hero_rect, _) =
-                ui.allocate_exact_size(Vec2::new(avail_w, 62.0), Sense::hover());
+                ui.allocate_exact_size(Vec2::new(avail_w, 68.0), Sense::hover());
             let hp = ui.painter_at(hero_rect);
             hp.rect_filled(hero_rect, CornerRadius::same(12), theme.inset);
 
             let mut hero_ui = ui.new_child(
-                egui::UiBuilder::new().max_rect(hero_rect.shrink2(Vec2::new(12.0, 9.0))),
+                egui::UiBuilder::new().max_rect(hero_rect.shrink2(Vec2::new(12.0, 10.0))),
             );
             hero_ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
                 let inner_w = ui.available_width();
-                let text_w = inner_w - 50.0;
+                let text_w = inner_w - 54.0;
+                let full_name = self.full_title();
 
-                ui.allocate_ui(Vec2::new(text_w, 44.0), |ui| {
+                ui.allocate_ui(Vec2::new(text_w, 48.0), |ui| {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::ZERO;
-                        ui.label(
+                        let title_resp = ui.label(
                             RichText::new(self.display_title())
-                                .font(bold_font(15.5))
+                                .font(bold_font(16.0))
                                 .color(theme.text),
                         );
-                        ui.add_space(3.0);
+                        if full_name != self.display_title() {
+                            title_resp.on_hover_text(&full_name);
+                        }
+                        ui.add_space(4.0);
                         ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing = Vec2::new(6.0, 0.0);
-                            // Mini inline calm wave meter (8 subtle crisp bars)
-                            let (eq_rect, _) = ui
-                                .allocate_exact_size(Vec2::new(34.0, 12.0), Sense::hover());
+                            ui.spacing_mut().item_spacing = Vec2::new(7.0, 0.0);
+                            let (eq_rect, _) =
+                                ui.allocate_exact_size(Vec2::new(34.0, 14.0), Sense::hover());
                             let ep = ui.painter_at(eq_rect);
                             let bw = 2.4_f32;
                             let gap = 1.8_f32;
                             for i in 0..BAR_COUNT {
-                                let h = (self.bar_height(i) * 11.0).max(2.5);
+                                let h = (self.bar_height(i) * 12.0).max(2.5);
                                 let x = eq_rect.min.x + i as f32 * (bw + gap);
                                 let y = eq_rect.center().y - h * 0.5;
                                 ep.rect_filled(
@@ -554,40 +583,49 @@ impl ZenhushUiApp {
                             } else {
                                 theme.subtext
                             };
-                            ui.label(
+                            let sub_resp = ui.label(
                                 RichText::new(self.display_subtitle())
-                                    .font(semibold_font(10.5))
+                                    .font(semibold_font(12.0))
                                     .color(sub_color),
                             );
+                            if let Some(ref err) = self.snap.audio_error {
+                                sub_resp.on_hover_text(err);
+                            }
                         });
                     });
                 });
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let (play_rect, play_resp) =
-                        ui.allocate_exact_size(Vec2::splat(42.0), Sense::click());
+                        ui.allocate_exact_size(Vec2::splat(44.0), Sense::click());
                     let pp = ui.painter_at(play_rect);
-                    pp.circle_filled(
-                        play_rect.center(),
-                        21.0,
-                        if play_resp.is_pointer_button_down_on() {
-                            theme.pressed
-                        } else {
-                            theme.accent
-                        },
-                    );
+                    let fill = if play_resp.is_pointer_button_down_on() {
+                        theme.pressed
+                    } else if play_resp.hovered() {
+                        theme.accent.gamma_multiply(0.92)
+                    } else {
+                        theme.accent
+                    };
+                    pp.circle_filled(play_rect.center(), 22.0, fill);
+                    if play_resp.has_focus() {
+                        pp.circle_stroke(
+                            play_rect.center(),
+                            21.0,
+                            Stroke::new(2.0_f32, theme.text),
+                        );
+                    }
                     let glyph = if self.snap.playing {
                         IconKind::Pause
                     } else {
                         IconKind::Play
                     };
-                    if let Some(tex) = self.icons.texture(ctx, glyph, theme.on_accent, 17) {
+                    if let Some(tex) = self.icons.texture(ctx, glyph, theme.on_accent, 18) {
                         let nudge = if self.snap.playing { 0.0 } else { 1.5 };
                         pp.image(
                             tex.id(),
                             Rect::from_center_size(
                                 play_rect.center() + Vec2::new(nudge, 0.0),
-                                Vec2::splat(17.0),
+                                Vec2::splat(18.0),
                             ),
                             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                             Color32::WHITE,
@@ -595,9 +633,9 @@ impl ZenhushUiApp {
                     }
                     if play_resp
                         .on_hover_text(if self.snap.playing {
-                            "Pause (Space)"
+                            "Pause focus audio (Space)"
                         } else {
-                            "Play (Space)"
+                            "Play focus audio (Space)"
                         })
                         .clicked()
                     {
@@ -606,9 +644,9 @@ impl ZenhushUiApp {
                 });
             });
 
-            ui.add_space(12.0);
+            ui.add_space(14.0);
 
-            // 3. 4x2 Equal Sound Chips
+            // 3. Homogeneous 4x2 Sound Chips (32px tall, >= 6:1 contrast on active)
             let chip_gap = 6.0;
             let chip_w = (avail_w - chip_gap * 3.0) / 4.0;
             for row in 0..2 {
@@ -618,7 +656,7 @@ impl ZenhushUiApp {
                         let sound = Sound::ALL[row * 4 + col];
                         let active = !self.snap.is_file_mode && self.snap.active_sound == sound;
                         let (rect, resp) =
-                            ui.allocate_exact_size(Vec2::new(chip_w, 28.0), Sense::click());
+                            ui.allocate_exact_size(Vec2::new(chip_w, 32.0), Sense::click());
                         let bg = if active {
                             theme.accent
                         } else if resp.hovered() {
@@ -627,13 +665,28 @@ impl ZenhushUiApp {
                             theme.inset
                         };
                         let fg = if active { theme.on_accent } else { theme.text };
-                        ui.painter_at(rect)
-                            .rect_filled(rect, CornerRadius::same(8), bg);
-                        ui.painter_at(rect).text(
+                        let p = ui.painter_at(rect);
+                        p.rect_filled(rect, CornerRadius::same(8), bg);
+                        if resp.has_focus() {
+                            p.rect_stroke(
+                                rect,
+                                CornerRadius::same(8),
+                                Stroke::new(2.0_f32, theme.text),
+                                egui::StrokeKind::Inside,
+                            );
+                        } else if active {
+                            p.rect_stroke(
+                                rect,
+                                CornerRadius::same(8),
+                                Stroke::new(1.5_f32, theme.on_accent.gamma_multiply(0.35)),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        p.text(
                             rect.center(),
                             egui::Align2::CENTER_CENTER,
                             sound.short_label(),
-                            semibold_font(11.0),
+                            semibold_font(12.0),
                             fg,
                         );
                         if resp.clicked() {
@@ -646,11 +699,11 @@ impl ZenhushUiApp {
                 }
             }
 
-            ui.add_space(12.0);
+            ui.add_space(14.0);
 
-            // 4. Volume Row (knob properly inset so 0% and 100% never clip!)
+            // 4. Volume Row (28px tall, unclipped knob, 12px tabular readout)
             ui.horizontal(|ui| {
-                ui.set_height(26.0);
+                ui.set_height(28.0);
                 ui.spacing_mut().item_spacing = Vec2::new(6.0, 0.0);
                 let mute_kind = if self.snap.muted || self.snap.volume == 0 {
                     IconKind::Mute
@@ -666,19 +719,23 @@ impl ZenhushUiApp {
                     ui,
                     &mut self.icons,
                     mute_kind,
-                    24.0,
-                    15,
+                    28.0,
+                    16,
                     mute_col,
                     theme,
-                    "Mute (M)",
+                    if self.snap.muted {
+                        "Unmute audio (M)"
+                    } else {
+                        "Mute audio (M)"
+                    },
                 ) {
                     self.send(UiCmd::ToggleMute);
                 }
 
-                let slider_w = (avail_w - 24.0 - 38.0 - 12.0).max(80.0);
+                let slider_w = (avail_w - 28.0 - 40.0 - 12.0).max(80.0);
                 let (s_rect, s_resp) =
-                    ui.allocate_exact_size(Vec2::new(slider_w, 24.0), Sense::click_and_drag());
-                let knob_r = 6.5_f32;
+                    ui.allocate_exact_size(Vec2::new(slider_w, 28.0), Sense::click_and_drag());
+                let knob_r = 7.0_f32;
                 let track_left = s_rect.min.x + knob_r;
                 let track_w = (s_rect.width() - knob_r * 2.0).max(1.0);
                 if s_resp.clicked() || s_resp.dragged() {
@@ -725,19 +782,19 @@ impl ZenhushUiApp {
                 } else {
                     format!("{}%", self.snap.volume)
                 };
-                let (pct_rect, _) = ui.allocate_exact_size(Vec2::new(38.0, 24.0), Sense::hover());
+                let (pct_rect, _) = ui.allocate_exact_size(Vec2::new(40.0, 28.0), Sense::hover());
                 ui.painter_at(pct_rect).text(
                     Pos2::new(pct_rect.max.x, pct_rect.center().y),
                     egui::Align2::RIGHT_CENTER,
                     vol_txt,
-                    semibold_font(11.0),
+                    semibold_font(12.0),
                     theme.subtext,
                 );
             });
 
-            ui.add_space(10.0);
+            ui.add_space(12.0);
 
-            // 5. Bottom Actions: Timer Pill + Add Your File
+            // 5. Bottom Actions: Sleep Timer + Choose File… (32px tall, verb-first)
             let pill_gap = 8.0;
             let pill_w = (avail_w - pill_gap) * 0.5;
             ui.horizontal(|ui| {
@@ -745,29 +802,48 @@ impl ZenhushUiApp {
 
                 let timer_txt = if let Some(rem) = self.snap.timer_remaining_secs {
                     if rem > 0 {
-                        format!("Timer · {}", format_duration(rem))
+                        format!("Timer: {}", format_duration(rem))
                     } else {
-                        "Timer · Off".to_string()
+                        "Timer: Off".to_string()
                     }
                 } else if self.snap.timer_minutes > 0 {
-                    format!("Timer · {}m", self.snap.timer_minutes)
+                    format!("Timer: {}m", self.snap.timer_minutes)
                 } else {
-                    "Timer · Off".to_string()
+                    "Timer: Off".to_string()
                 };
                 let timer_on = self.snap.timer_minutes > 0;
                 let (t_rect, t_resp) =
-                    ui.allocate_exact_size(Vec2::new(pill_w, 28.0), Sense::click());
-                ui.painter_at(t_rect).rect_filled(
+                    ui.allocate_exact_size(Vec2::new(pill_w, 32.0), Sense::click());
+                let tp = ui.painter_at(t_rect);
+                tp.rect_filled(
                     t_rect,
                     CornerRadius::same(8),
-                    if timer_on { theme.accent } else { theme.inset },
+                    if timer_on {
+                        theme.accent
+                    } else if t_resp.hovered() {
+                        theme.hover
+                    } else {
+                        theme.inset
+                    },
                 );
-                ui.painter_at(t_rect).text(
+                if t_resp.has_focus() {
+                    tp.rect_stroke(
+                        t_rect,
+                        CornerRadius::same(8),
+                        Stroke::new(2.0_f32, theme.text),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                tp.text(
                     t_rect.center(),
                     egui::Align2::CENTER_CENTER,
                     timer_txt,
-                    semibold_font(11.0),
-                    if timer_on { theme.on_accent } else { theme.text },
+                    semibold_font(12.0),
+                    if timer_on {
+                        theme.on_accent
+                    } else {
+                        theme.text
+                    },
                 );
                 if t_resp.on_hover_text("Cycle sleep timer (T)").clicked() {
                     let cur = self.snap.timer_minutes;
@@ -778,8 +854,9 @@ impl ZenhushUiApp {
                 }
 
                 let (f_rect, f_resp) =
-                    ui.allocate_exact_size(Vec2::new(pill_w, 28.0), Sense::click());
-                ui.painter_at(f_rect).rect_filled(
+                    ui.allocate_exact_size(Vec2::new(pill_w, 32.0), Sense::click());
+                let fp = ui.painter_at(f_rect);
+                fp.rect_filled(
                     f_rect,
                     CornerRadius::same(8),
                     if f_resp.hovered() {
@@ -788,30 +865,38 @@ impl ZenhushUiApp {
                         theme.inset
                     },
                 );
-                ui.painter_at(f_rect).text(
+                if f_resp.has_focus() {
+                    fp.rect_stroke(
+                        f_rect,
+                        CornerRadius::same(8),
+                        Stroke::new(2.0_f32, theme.text),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                fp.text(
                     f_rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    "+ Your File",
-                    semibold_font(11.0),
+                    "Choose File…",
+                    semibold_font(12.0),
                     theme.text,
                 );
                 if f_resp
-                    .on_hover_text("Choose or drop your own local audio track")
+                    .on_hover_text("Choose or drop your own local audio file (O)")
                     .clicked()
                 {
                     self.pick_local_file();
                 }
             });
 
-            // 6. Active File Strip (clear highlight when file mode is active + clear Lock pill)
+            // 6. Active File Strip (concentric radius 10px outer = 5px inner + 5px padding, >= 26px targets)
             if let Some(file_path) = self.snap.active_file.clone() {
-                ui.add_space(8.0);
+                ui.add_space(10.0);
                 let (row_rect, _) =
-                    ui.allocate_exact_size(Vec2::new(avail_w, 30.0), Sense::hover());
+                    ui.allocate_exact_size(Vec2::new(avail_w, 36.0), Sense::hover());
                 let rp = ui.painter_at(row_rect);
                 rp.rect_filled(
                     row_rect,
-                    CornerRadius::same(8),
+                    CornerRadius::same(10),
                     if self.snap.is_file_mode {
                         theme.accent.gamma_multiply(0.14)
                     } else {
@@ -821,43 +906,47 @@ impl ZenhushUiApp {
                 if self.snap.is_file_mode {
                     rp.rect_stroke(
                         row_rect,
-                        CornerRadius::same(8),
-                        Stroke::new(1.0_f32, theme.accent),
+                        CornerRadius::same(10),
+                        Stroke::new(1.5_f32, theme.accent),
                         egui::StrokeKind::Inside,
                     );
                 }
 
                 let mut child_ui = ui.new_child(
-                    egui::UiBuilder::new().max_rect(row_rect.shrink2(Vec2::new(8.0, 3.0))),
+                    egui::UiBuilder::new().max_rect(row_rect.shrink2(Vec2::new(8.0, 5.0))),
                 );
                 child_ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
-                    let lock_w = 54.0_f32;
-                    let name_w = (ui.available_width() - lock_w - 22.0 - 8.0).max(50.0);
+                    let lock_w = 82.0_f32;
+                    let name_w = (ui.available_width() - lock_w - 26.0 - 8.0).max(50.0);
+                    let full_track = self.active_track_title();
                     let (n_rect, n_resp) =
-                        ui.allocate_exact_size(Vec2::new(name_w, 24.0), Sense::click());
+                        ui.allocate_exact_size(Vec2::new(name_w, 26.0), Sense::click());
                     ui.painter_at(n_rect).text(
                         Pos2::new(n_rect.min.x, n_rect.center().y),
                         egui::Align2::LEFT_CENTER,
-                        truncate_chars(&self.active_track_title(), 22),
-                        semibold_font(11.0),
+                        truncate_chars(&full_track, 18),
+                        semibold_font(12.0),
                         if self.snap.is_file_mode {
                             theme.accent_text
                         } else {
                             theme.text
                         },
                     );
-                    if n_resp.on_hover_text("Play this local file").clicked() {
+                    if n_resp
+                        .on_hover_text(format!("Play {}", full_track))
+                        .clicked()
+                    {
                         self.send(UiCmd::SelectFileMode);
                     }
 
-                    // Explicit readable Lock / Locked pill
                     let locked = self.is_locked_default();
                     let (l_rect, l_resp) =
-                        ui.allocate_exact_size(Vec2::new(lock_w, 20.0), Sense::click());
-                    ui.painter_at(l_rect).rect_filled(
+                        ui.allocate_exact_size(Vec2::new(lock_w, 26.0), Sense::click());
+                    let lp = ui.painter_at(l_rect);
+                    lp.rect_filled(
                         l_rect,
-                        CornerRadius::same(6),
+                        CornerRadius::same(5),
                         if locked {
                             theme.accent
                         } else if l_resp.hovered() {
@@ -866,11 +955,23 @@ impl ZenhushUiApp {
                             theme.card
                         },
                     );
-                    ui.painter_at(l_rect).text(
+                    if l_resp.has_focus() {
+                        lp.rect_stroke(
+                            l_rect,
+                            CornerRadius::same(5),
+                            Stroke::new(2.0_f32, theme.text),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                    lp.text(
                         l_rect.center(),
                         egui::Align2::CENTER_CENTER,
-                        if locked { "Locked" } else { "Lock" },
-                        semibold_font(10.0),
+                        if locked {
+                            "Locked ✓"
+                        } else {
+                            "Lock default"
+                        },
+                        semibold_font(11.0),
                         if locked {
                             theme.on_accent
                         } else {
@@ -879,9 +980,9 @@ impl ZenhushUiApp {
                     );
                     if l_resp
                         .on_hover_text(if locked {
-                            "Locked as startup default (click to unlock)"
+                            "Unlock default startup track (L)"
                         } else {
-                            "Lock as default track on launch"
+                            "Lock as default track on launch (L)"
                         })
                         .clicked()
                     {
@@ -892,8 +993,8 @@ impl ZenhushUiApp {
                         ui,
                         &mut self.icons,
                         IconKind::Close,
-                        20.0,
-                        11,
+                        26.0,
+                        13,
                         theme.subtext,
                         theme,
                         "Remove local track",
@@ -907,7 +1008,7 @@ impl ZenhushUiApp {
                 ui.add_space(8.0);
                 ui.label(
                     RichText::new("Log out & back in once to live inside the GNOME top bar")
-                        .size(10.0)
+                        .size(11.0)
                         .color(theme.subtext),
                 );
             }
@@ -982,11 +1083,20 @@ fn icon_button(
     } else {
         Color32::TRANSPARENT
     };
+    let p = ui.painter_at(rect);
     if bg != Color32::TRANSPARENT {
-        ui.painter_at(rect).rect_filled(rect, CornerRadius::same(6), bg);
+        p.rect_filled(rect, CornerRadius::same(7), bg);
+    }
+    if resp.has_focus() {
+        p.rect_stroke(
+            rect,
+            CornerRadius::same(7),
+            Stroke::new(2.0_f32, theme.text),
+            egui::StrokeKind::Inside,
+        );
     }
     if let Some(tex) = icons.texture(ui.ctx(), kind, color, icon_px) {
-        ui.painter_at(rect).image(
+        p.image(
             tex.id(),
             Rect::from_center_size(rect.center(), Vec2::splat(icon_px as f32)),
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),

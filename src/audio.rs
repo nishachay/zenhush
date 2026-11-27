@@ -105,7 +105,7 @@ impl AudioEngine {
     fn default_device() -> Result<Device, String> {
         let host = cpal::default_host();
         host.default_output_device()
-            .ok_or_else(|| "No audio device".to_string())
+            .ok_or_else(|| "No audio — check output".to_string())
     }
 
     fn effective_volume(&self) -> u8 {
@@ -240,17 +240,17 @@ impl AudioEngine {
                 move |err| {
                     let _ = err;
                     if let Ok(mut slot) = err_clone.lock() {
-                        *slot = Some("Audio device unavailable".to_string());
+                        *slot = Some("Audio lost — check output".to_string());
                     }
                 },
                 None,
             )
-            .map_err(|_| "No audio device".to_string())?;
+            .map_err(|_| "No audio — check output".to_string())?;
 
         if self.playing {
             stream
                 .play()
-                .map_err(|_| "No audio device".to_string())?;
+                .map_err(|_| "No audio — check output".to_string())?;
             self.stream_paused = false;
         } else {
             self.stream_paused = true;

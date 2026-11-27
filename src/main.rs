@@ -84,8 +84,8 @@ fn run_ui_window() {
     };
 
     let loaded = settings::load();
-    let init_w = 304.0_f32;
-    let init_h = 272.0_f32;
+    let init_w = 312.0_f32;
+    let init_h = 306.0_f32;
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([init_w, init_h])

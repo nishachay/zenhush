@@ -15,14 +15,14 @@ mod linux {
     use zbus::zvariant::OwnedValue;
 
     const UUID: &str = "zenhush@zenhush.app";
-    const EXT_VERSION: u32 = 3;
+    const EXT_VERSION: u32 = 4;
 
     const METADATA_JSON: &str = r#"{
   "uuid": "zenhush@zenhush.app",
   "name": "Zenhush",
   "description": "Minimal focus audio player directly in your GNOME top bar.",
   "shell-version": ["45", "46", "47", "48", "49", "50", "51"],
-  "version": 3
+  "version": 4
 }
 "#;
 
@@ -40,13 +40,14 @@ mod linux {
   border-radius: 99px;
   background-color: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.10);
+  transition-duration: 120ms;
 }
 .zenhush-panel-pill.playing {
-  background-color: rgba(200, 130, 62, 0.22);
-  border-color: rgba(200, 130, 62, 0.55);
+  background-color: rgba(200, 130, 62, 0.24);
+  border-color: rgba(226, 168, 108, 0.55);
 }
 .zenhush-panel-icon {
-  color: rgba(235, 229, 220, 0.85);
+  color: rgba(235, 229, 220, 0.88);
 }
 .zenhush-panel-pill.playing .zenhush-panel-icon {
   color: #E2A86C;
@@ -68,86 +69,109 @@ mod linux {
 }
 
 .zenhush-menu-root {
-  width: 296px;
+  width: 308px;
   padding: 14px;
-  spacing: 12px;
+  spacing: 14px;
 }
 
 .zenhush-hero {
-  padding: 10px 12px;
+  padding: 12px;
   border-radius: 12px;
   background-color: rgba(255, 255, 255, 0.06);
-  spacing: 10px;
+  spacing: 12px;
 }
 .zenhush-title {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 700;
   color: #F5F1EA;
 }
 .zenhush-subtitle {
-  font-size: 11px;
-  color: #A89F92;
+  font-size: 12px;
+  color: #B4ABA0;
 }
 .zenhush-subtitle.error {
-  color: #E2A86C;
+  color: #F2B880;
 }
 
 .zenhush-play-btn {
-  width: 42px;
-  height: 42px;
+  width: 44px;
+  height: 44px;
   border-radius: 99px;
   background-color: #C8823E;
-  color: #FFFFFF;
+  color: #14100C;
+  transition-duration: 120ms;
 }
 .zenhush-play-btn:hover {
   background-color: #D7914D;
 }
 .zenhush-play-btn:active {
-  background-color: #A96E33;
+  background-color: #B47232;
+}
+.zenhush-play-btn:focus {
+  box-shadow: 0 0 0 2px #F5F1EA;
+}
+
+.zenhush-grid-wrap {
+  spacing: 6px;
 }
 
 .zenhush-chip {
-  padding: 7px 4px;
+  min-height: 32px;
+  padding: 7px 6px;
   border-radius: 9px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  color: #D8D1C7;
-  background-color: rgba(255, 255, 255, 0.07);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  color: #E2DBD0;
+  background-color: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  transition-duration: 120ms;
 }
 .zenhush-chip:hover {
-  background-color: rgba(255, 255, 255, 0.13);
+  background-color: rgba(255, 255, 255, 0.14);
   color: #FFFFFF;
+}
+.zenhush-chip:focus {
+  box-shadow: 0 0 0 2px #F5F1EA;
 }
 .zenhush-chip.active {
   background-color: #C8823E;
-  border-color: #E2A86C;
-  color: #FFFFFF;
+  border-color: #E6AE75;
+  color: #14100C;
+}
+.zenhush-chip.active:hover {
+  background-color: #D7914D;
+  color: #14100C;
 }
 
 .zenhush-vol-row {
   spacing: 8px;
 }
 .zenhush-icon-btn {
-  padding: 5px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 6px;
   border-radius: 8px;
-  color: #C9C0B4;
+  color: #D4CBC0;
   background-color: transparent;
+  transition-duration: 120ms;
 }
 .zenhush-icon-btn:hover {
-  background-color: rgba(255, 255, 255, 0.10);
+  background-color: rgba(255, 255, 255, 0.11);
   color: #FFFFFF;
+}
+.zenhush-icon-btn:focus {
+  box-shadow: 0 0 0 2px #F5F1EA;
 }
 .zenhush-icon-btn.active {
   color: #E2A86C;
 }
 .zenhush-vol-hit {
-  height: 20px;
+  height: 28px;
 }
 .zenhush-vol-track {
   height: 5px;
   border-radius: 99px;
-  background-color: rgba(255, 255, 255, 0.15);
+  background-color: rgba(255, 255, 255, 0.16);
 }
 .zenhush-vol-fill {
   height: 5px;
@@ -155,90 +179,114 @@ mod linux {
   background-color: #C8823E;
 }
 .zenhush-vol-fill.muted {
-  background-color: rgba(168, 159, 146, 0.45);
+  background-color: rgba(176, 167, 154, 0.45);
 }
 .zenhush-vol-knob {
-  width: 12px;
-  height: 12px;
+  width: 13px;
+  height: 13px;
   border-radius: 99px;
   background-color: #F5F1EA;
-  border: 1.5px solid #C8823E;
+  border: 2px solid #C8823E;
 }
 .zenhush-vol-knob.muted {
   border-color: #7D7468;
 }
 .zenhush-vol-pct {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  color: #A89F92;
-  min-width: 34px;
+  font-feature-settings: "tnum";
+  color: #B4ABA0;
+  min-width: 38px;
   text-align: right;
 }
 
 .zenhush-action-pill {
+  min-height: 32px;
   padding: 7px 10px;
   border-radius: 9px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  color: #E2DBD0;
-  background-color: rgba(255, 255, 255, 0.07);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  font-feature-settings: "tnum";
+  color: #EAE3D8;
+  background-color: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  transition-duration: 120ms;
 }
 .zenhush-action-pill:hover {
-  background-color: rgba(255, 255, 255, 0.13);
+  background-color: rgba(255, 255, 255, 0.14);
+}
+.zenhush-action-pill:focus {
+  box-shadow: 0 0 0 2px #F5F1EA;
 }
 .zenhush-action-pill.active {
-  background-color: rgba(200, 130, 62, 0.28);
-  border-color: rgba(200, 130, 62, 0.70);
-  color: #F6CBA0;
+  background-color: #C8823E;
+  border-color: #E6AE75;
+  color: #14100C;
 }
 
+/* Concentric radii: outer 10px = inner 5px + padding 5px */
 .zenhush-file-row {
   spacing: 6px;
-  padding: 6px 8px;
-  border-radius: 9px;
-  background-color: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  padding: 5px 8px;
+  border-radius: 10px;
+  background-color: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition-duration: 120ms;
 }
 .zenhush-file-row.active {
-  border-color: rgba(200, 130, 62, 0.70);
+  border-color: #E2A86C;
   background-color: rgba(200, 130, 62, 0.16);
 }
 .zenhush-file-name {
-  font-size: 11px;
+  min-height: 26px;
+  padding: 3px 4px;
+  border-radius: 5px;
+  font-size: 12px;
   font-weight: 600;
-  color: #EFE9DF;
+  color: #F5F1EA;
+}
+.zenhush-file-name:focus {
+  box-shadow: 0 0 0 2px #F5F1EA;
 }
 .zenhush-lock-pill {
-  padding: 3px 8px;
-  border-radius: 6px;
-  font-size: 10px;
+  min-height: 26px;
+  padding: 4px 9px;
+  border-radius: 5px;
+  font-size: 11px;
   font-weight: 600;
-  color: #C6BDB0;
-  background-color: rgba(255, 255, 255, 0.09);
+  color: #E2DBD0;
+  background-color: rgba(255, 255, 255, 0.10);
+  transition-duration: 120ms;
 }
 .zenhush-lock-pill:hover {
-  background-color: rgba(255, 255, 255, 0.16);
+  background-color: rgba(255, 255, 255, 0.18);
+}
+.zenhush-lock-pill:focus {
+  box-shadow: 0 0 0 2px #F5F1EA;
 }
 .zenhush-lock-pill.locked {
   background-color: #C8823E;
-  color: #FFFFFF;
+  color: #14100C;
 }
 
 .zenhush-footer {
-  padding-top: 6px;
-  border-top-width: 1px;
-  border-top-color: rgba(255, 255, 255, 0.08);
+  spacing: 8px;
 }
 .zenhush-footer-link {
-  padding: 4px 6px;
-  border-radius: 6px;
-  font-size: 11px;
-  color: #9A9185;
+  min-height: 28px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #B4ABA0;
+  transition-duration: 120ms;
 }
 .zenhush-footer-link:hover {
   color: #F5F1EA;
-  background-color: rgba(255, 255, 255, 0.08);
+  background-color: rgba(255, 255, 255, 0.09);
+}
+.zenhush-footer-link:focus {
+  box-shadow: 0 0 0 2px #F5F1EA;
 }
 "#;
 
@@ -298,7 +346,6 @@ class ZenhushIndicator extends PanelMenu.Button {
         };
         this._draggingVol = false;
 
-        // Top-bar pill with custom Zenhush waveform icon + optional live dot + label
         this._pill = new St.BoxLayout({
             style_class: 'zenhush-panel-pill',
             y_align: Clutter.ActorAlign.CENTER,
@@ -375,17 +422,20 @@ class ZenhushIndicator extends PanelMenu.Button {
             y_align: Clutter.ActorAlign.CENTER,
         });
         this._titleLabel = new St.Label({text: 'Brown Noise', style_class: 'zenhush-title'});
-        this._subtitleLabel = new St.Label({text: 'deep and warm', style_class: 'zenhush-subtitle'});
+        this._subtitleLabel = new St.Label({text: 'deep and warm · Ready', style_class: 'zenhush-subtitle'});
         heroText.add_child(this._titleLabel);
         heroText.add_child(this._subtitleLabel);
 
         this._playIcon = new St.Icon({
             icon_name: 'media-playback-start-symbolic',
-            icon_size: 17,
+            icon_size: 18,
+            translation_x: 1.5,
         });
         this._playBtn = new St.Button({
             style_class: 'zenhush-play-btn',
             child: this._playIcon,
+            can_focus: true,
+            accessible_name: 'Play focus audio',
             y_align: Clutter.ActorAlign.CENTER,
         });
         this._playBtn.connect('clicked', () => this._callPlayer('PlayPause'));
@@ -394,7 +444,12 @@ class ZenhushIndicator extends PanelMenu.Button {
         hero.add_child(this._playBtn);
         root.add_child(hero);
 
-        // 2. Homogeneous 4x2 Sound Grid (exact equal-width columns)
+        // 2. Homogeneous 4x2 Sound Grid (tight 6px internal gap vs 14px external group gap)
+        const gridWrap = new St.BoxLayout({
+            vertical: true,
+            style_class: 'zenhush-grid-wrap',
+            x_expand: true,
+        });
         this._soundBtns = [];
         for (let r = 0; r < 2; r++) {
             const row = new St.Widget({
@@ -410,6 +465,7 @@ class ZenhushIndicator extends PanelMenu.Button {
                 const btn = new St.Button({
                     label: SOUNDS[idx],
                     style_class: 'zenhush-chip',
+                    can_focus: true,
                     x_expand: true,
                 });
                 btn.connect('clicked', () => {
@@ -418,10 +474,11 @@ class ZenhushIndicator extends PanelMenu.Button {
                 this._soundBtns.push(btn);
                 row.add_child(btn);
             }
-            root.add_child(row);
+            gridWrap.add_child(row);
         }
+        root.add_child(gridWrap);
 
-        // 3. Volume Row (generous hit area + knob that never clips)
+        // 3. Volume Row (28px hit target + unclipped thumb knob + tnum %)
         const volRow = new St.BoxLayout({
             style_class: 'zenhush-vol-row',
             x_expand: true,
@@ -434,6 +491,8 @@ class ZenhushIndicator extends PanelMenu.Button {
         this._muteBtn = new St.Button({
             style_class: 'zenhush-icon-btn',
             child: this._muteIcon,
+            can_focus: true,
+            accessible_name: 'Mute audio',
         });
         this._muteBtn.connect('clicked', () => this._callCtrl('ToggleMute', null));
 
@@ -510,7 +569,7 @@ class ZenhushIndicator extends PanelMenu.Button {
         volRow.add_child(this._volPctLabel);
         root.add_child(volRow);
 
-        // 4. Homogeneous 2-Column Actions Row: Timer + Your File
+        // 4. Homogeneous 2-Column Actions Row: Timer + Choose File…
         const actRow = new St.Widget({
             x_expand: true,
             layout_manager: new Clutter.BoxLayout({
@@ -520,15 +579,17 @@ class ZenhushIndicator extends PanelMenu.Button {
             }),
         });
         this._timerBtn = new St.Button({
-            label: 'Timer · Off',
+            label: 'Timer: Off',
             style_class: 'zenhush-action-pill',
+            can_focus: true,
             x_expand: true,
         });
         this._timerBtn.connect('clicked', () => this._callCtrl('CycleTimer', null));
 
         this._pickFileBtn = new St.Button({
-            label: '+ Your File',
+            label: 'Choose File…',
             style_class: 'zenhush-action-pill',
+            can_focus: true,
             x_expand: true,
         });
         this._pickFileBtn.connect('clicked', () => {
@@ -549,14 +610,16 @@ class ZenhushIndicator extends PanelMenu.Button {
         this._fileSelectBtn = new St.Button({
             label: 'Local Track',
             style_class: 'zenhush-file-name',
+            can_focus: true,
             x_expand: true,
             x_align: Clutter.ActorAlign.START,
         });
         this._fileSelectBtn.connect('clicked', () => this._callCtrl('SelectFile', null));
 
         this._lockBtn = new St.Button({
-            label: 'Lock',
+            label: 'Lock default',
             style_class: 'zenhush-lock-pill',
+            can_focus: true,
         });
         this._lockBtn.connect('clicked', () => this._callCtrl('ToggleLockDefault', null));
 
@@ -564,6 +627,8 @@ class ZenhushIndicator extends PanelMenu.Button {
         this._clearFileBtn = new St.Button({
             style_class: 'zenhush-icon-btn',
             child: clearIcon,
+            can_focus: true,
+            accessible_name: 'Remove local file',
         });
         this._clearFileBtn.connect('clicked', () => this._callCtrl('RemoveFile', null));
 
@@ -572,19 +637,21 @@ class ZenhushIndicator extends PanelMenu.Button {
         this._fileRow.add_child(this._clearFileBtn);
         root.add_child(this._fileRow);
 
-        // 6. Quiet Footer: Autostart + Quit
+        // 6. Quiet Footer (separated by 14px space, zero extra divider lines)
         const footer = new St.BoxLayout({style_class: 'zenhush-footer', x_expand: true});
         this._autostartBtn = new St.Button({
-            label: 'Autostart: Off',
+            label: 'Start at login: Off',
             style_class: 'zenhush-footer-link',
+            can_focus: true,
             x_expand: true,
             x_align: Clutter.ActorAlign.START,
         });
         this._autostartBtn.connect('clicked', () => this._callCtrl('ToggleAutostart', null));
 
         const quitBtn = new St.Button({
-            label: 'Quit',
+            label: 'Quit Zenhush',
             style_class: 'zenhush-footer-link',
+            can_focus: true,
             x_align: Clutter.ActorAlign.END,
         });
         quitBtn.connect('clicked', () => {
@@ -603,7 +670,7 @@ class ZenhushIndicator extends PanelMenu.Button {
     _applyVolPointer(event) {
         const [ex] = event.get_coords();
         const [tx] = this._volHit.get_transformed_position();
-        const knobW = 12;
+        const knobW = 13;
         const usable = Math.max(1, this._volHit.width - knobW);
         const pct = Math.round(Math.max(0, Math.min(1, (ex - tx - knobW * 0.5) / usable)) * 100);
         this._updateVolumeBar(pct, false);
@@ -613,7 +680,7 @@ class ZenhushIndicator extends PanelMenu.Button {
     _updateVolumeBar(pct, muted) {
         const w = this._volHit.width;
         if (w <= 1) return;
-        const knobW = 12;
+        const knobW = 13;
         const clamped = muted ? 0 : Math.max(0, Math.min(100, pct));
         const knobX = Math.round(((w - knobW) * clamped) / 100);
         this._volFill.width = Math.max(knobW * 0.5, knobX + knobW * 0.5);
@@ -622,6 +689,7 @@ class ZenhushIndicator extends PanelMenu.Button {
         this._volKnob.style_class = muted ? 'zenhush-vol-knob muted' : 'zenhush-vol-knob';
         this._volPctLabel.text = muted ? 'Mute' : `${pct}%`;
         this._muteIcon.icon_name = muted ? 'audio-volume-muted-symbolic' : 'audio-volume-high-symbolic';
+        this._muteBtn.accessible_name = muted ? 'Unmute audio' : 'Mute audio';
         this._muteBtn.style_class = muted ? 'zenhush-icon-btn active' : 'zenhush-icon-btn';
     }
 
@@ -640,10 +708,12 @@ class ZenhushIndicator extends PanelMenu.Button {
             this._panelLabel.text = 'Zenhush';
         }
 
-        // Hero
-        this._titleLabel.text = trunc(st.title, 20);
+        // Hero (show full title on hover if truncated)
+        this._titleLabel.text = trunc(st.title, 19);
+        this._titleLabel.has_tooltip = st.title && st.title.length > 19;
+        this._titleLabel.tooltip_text = st.title || '';
         if (st.audio_error) {
-            this._subtitleLabel.text = trunc(st.audio_error, 28);
+            this._subtitleLabel.text = trunc(st.audio_error, 30);
             this._subtitleLabel.style_class = 'zenhush-subtitle error';
         } else {
             const stateStr = st.playing ? 'Playing' : (st.has_played ? 'Paused' : 'Ready');
@@ -653,6 +723,9 @@ class ZenhushIndicator extends PanelMenu.Button {
         this._playIcon.icon_name = st.playing
             ? 'media-playback-pause-symbolic'
             : 'media-playback-start-symbolic';
+        // Optical nudge toward triangle tip when showing Play icon
+        this._playIcon.translation_x = st.playing ? 0 : 1.5;
+        this._playBtn.accessible_name = st.playing ? 'Pause focus audio' : 'Play focus audio';
 
         // Sound Grid
         for (let i = 0; i < this._soundBtns.length; i++) {
@@ -665,27 +738,30 @@ class ZenhushIndicator extends PanelMenu.Button {
 
         // Timer button
         if (st.timer_remaining_secs && st.timer_remaining_secs > 0) {
-            this._timerBtn.label = `Timer · ${fmtTime(st.timer_remaining_secs)}`;
+            this._timerBtn.label = `Timer: ${fmtTime(st.timer_remaining_secs)}`;
             this._timerBtn.style_class = 'zenhush-action-pill active';
         } else if (st.timer_minutes > 0) {
-            this._timerBtn.label = `Timer · ${st.timer_minutes}m`;
+            this._timerBtn.label = `Timer: ${st.timer_minutes}m`;
             this._timerBtn.style_class = 'zenhush-action-pill active';
         } else {
-            this._timerBtn.label = 'Timer · Off';
+            this._timerBtn.label = 'Timer: Off';
             this._timerBtn.style_class = 'zenhush-action-pill';
         }
 
-        // File row
+        // File row (recover full track name via tooltip if truncated)
         this._fileRow.visible = Boolean(st.has_file);
         if (st.has_file) {
             this._fileRow.style_class = st.is_file ? 'zenhush-file-row active' : 'zenhush-file-row';
-            this._fileSelectBtn.label = trunc(st.file_title || 'Local Audio', 21);
-            this._lockBtn.label = st.locked_default ? 'Locked' : 'Lock';
+            const fullName = st.file_title || 'Local track';
+            this._fileSelectBtn.label = trunc(fullName, 17);
+            this._fileSelectBtn.has_tooltip = true;
+            this._fileSelectBtn.tooltip_text = `Play ${fullName}`;
+            this._lockBtn.label = st.locked_default ? 'Locked ✓' : 'Lock default';
             this._lockBtn.style_class = st.locked_default ? 'zenhush-lock-pill locked' : 'zenhush-lock-pill';
         }
 
-        // Autostart
-        this._autostartBtn.label = st.autostart ? 'Autostart: On' : 'Autostart: Off';
+        // Footer
+        this._autostartBtn.label = st.autostart ? 'Start at login: On' : 'Start at login: Off';
     }
 
     _callPlayer(method) {
