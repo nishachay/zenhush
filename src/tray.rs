@@ -5,9 +5,9 @@
 //!   amber-accented active icon whenever audio is playing.
 //! - macOS / Windows: native `tray-icon` menu-bar / notification-area icon.
 
-use std::sync::mpsc::{channel, Receiver};
 #[cfg(target_os = "linux")]
 use std::sync::mpsc::Sender;
+use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
 
 use crate::synth::Sound;
@@ -117,7 +117,7 @@ mod platform {
     fn to_ksni_icon(active_amber: bool) -> Vec<Icon> {
         let (w, h, rgba) = build_rgba_icon(active_amber);
         let mut argb = Vec::with_capacity(rgba.len());
-        for px in rgba.chunks_exact(4) {
+        for px in rgba.as_chunks::<4>().0 {
             argb.push(px[3]); // A
             argb.push(px[0]); // R
             argb.push(px[1]); // G
@@ -155,7 +155,10 @@ mod platform {
         fn title(&self) -> String {
             if self.state.playing {
                 if !self.state.timer_label.is_empty() {
-                    format!("Zenhush • {} ({})", self.state.sound_title, self.state.timer_label)
+                    format!(
+                        "Zenhush • {} ({})",
+                        self.state.sound_title, self.state.timer_label
+                    )
                 } else {
                     format!("Zenhush • {}", self.state.sound_title)
                 }

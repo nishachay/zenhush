@@ -69,18 +69,6 @@ pub enum FileTone {
     Custom,
 }
 
-impl FileTone {
-    pub const ALL: [FileTone; 3] = [FileTone::Original, FileTone::Warm, FileTone::Custom];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            FileTone::Original => "Studio",
-            FileTone::Warm => "Warm",
-            FileTone::Custom => "Custom EQ",
-        }
-    }
-}
-
 /// The procedural focus soundscapes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum Sound {
@@ -104,15 +92,6 @@ impl Sound {
         Sound::Fireplace,
         Sound::Forest,
         Sound::Drone,
-    ];
-
-    /// Compact atmosphere overlay options suitable for layering behind music or noise.
-    pub const ATMOSPHERE_LAYERS: [Sound; 5] = [
-        Sound::Rain,
-        Sound::Fireplace,
-        Sound::Brown,
-        Sound::Ocean,
-        Sound::Forest,
     ];
 
     pub fn title(self) -> &'static str {
@@ -621,7 +600,7 @@ impl Synth {
         let mut cnt = self.rms_n;
         let rms_chunk = self.rms_chunk;
 
-        for frame in out.chunks_exact_mut(2) {
+        for frame in out.as_chunks_mut::<2>().0 {
             let (raw, is_file) = self.produce_primary();
 
             // Shape primary channel
@@ -764,18 +743,9 @@ mod tests {
             let mut buf = vec![0.0f32; 48_000 * 2];
             synth.render_stereo(&mut buf);
             assert!(buf.iter().any(|&s| s != 0.0), "{:?} is silent", sound);
-            assert!(
-                buf.iter().all(|&s| s.abs() < 1.0),
-                "{:?} clipped",
-                sound
-            );
+            assert!(buf.iter().all(|&s| s.abs() < 1.0), "{:?} clipped", sound);
             let r = rms_stereo(&buf);
-            assert!(
-                r > 0.01 && r < 0.55,
-                "{:?} rms {} out of band",
-                sound,
-                r
-            );
+            assert!(r > 0.01 && r < 0.55, "{:?} rms {} out of band", sound, r);
         }
     }
 

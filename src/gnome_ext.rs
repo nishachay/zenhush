@@ -881,7 +881,9 @@ export default class ZenhushTopBarExtension extends Extension {
     }
 
     pub fn is_installed() -> bool {
-        ext_dir().map(|d| d.join("extension.js").exists()).unwrap_or(false)
+        ext_dir()
+            .map(|d| d.join("extension.js").exists())
+            .unwrap_or(false)
     }
 
     fn installed_version() -> u32 {
@@ -945,7 +947,13 @@ export default class ZenhushTopBarExtension extends Extension {
         let mut items: Vec<String> = raw
             .split('\'')
             .enumerate()
-            .filter_map(|(i, s)| if i % 2 == 1 { Some(s.to_string()) } else { None })
+            .filter_map(|(i, s)| {
+                if i % 2 == 1 {
+                    Some(s.to_string())
+                } else {
+                    None
+                }
+            })
             .collect();
         if !items.iter().any(|x| x == UUID) {
             items.push(UUID.to_string());
@@ -1028,7 +1036,13 @@ export default class ZenhushTopBarExtension extends Extension {
             let filtered: Vec<String> = raw
                 .split('\'')
                 .enumerate()
-                .filter_map(|(i, s)| if i % 2 == 1 { Some(s.to_string()) } else { None })
+                .filter_map(|(i, s)| {
+                    if i % 2 == 1 {
+                        Some(s.to_string())
+                    } else {
+                        None
+                    }
+                })
                 .filter(|x| x != UUID)
                 .collect();
             let literal = format!(
@@ -1071,11 +1085,11 @@ mod fallback {
     }
 }
 
-#[cfg(target_os = "linux")]
-pub use linux::{
-    ensure_installed_and_enabled, install_gnome_pill, is_active, is_installed, uninstall_gnome_pill,
-};
 #[cfg(not(target_os = "linux"))]
 pub use fallback::{
+    ensure_installed_and_enabled, install_gnome_pill, is_active, is_installed, uninstall_gnome_pill,
+};
+#[cfg(target_os = "linux")]
+pub use linux::{
     ensure_installed_and_enabled, install_gnome_pill, is_active, is_installed, uninstall_gnome_pill,
 };

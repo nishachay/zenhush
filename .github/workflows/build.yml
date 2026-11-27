@@ -9,6 +9,20 @@ on:
   workflow_dispatch:
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install Linux audio headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxkbcommon-x11-0
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
+
   test-and-build:
     strategy:
       fail-fast: false
@@ -20,7 +34,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Linux audio headers
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxkbcommon-x11-0
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxkbcommon-x11-0 desktop-file-utils dpkg
       - name: Run tests
         run: cargo test --locked
       - name: Build release binary
@@ -35,6 +49,40 @@ jobs:
             cp target/release/zenhush dist/zenhush-macos
           else
             cp target/release/zenhush dist/zenhush-linux-x86_64
+            VER=$(grep '^version =' Cargo.toml | head -n1 | cut -d'"' -f2)
+            PKG="dist/deb_root"
+            mkdir -p "$PKG/DEBIAN" "$PKG/usr/bin" "$PKG/usr/share/applications" \
+              "$PKG/usr/share/icons/hicolor/scalable/apps" \
+              "$PKG/usr/share/icons/hicolor/256x256/apps"
+            install -m 755 target/release/zenhush "$PKG/usr/bin/zenhush"
+            install -m 644 assets/zenhush.svg "$PKG/usr/share/icons/hicolor/scalable/apps/zenhush.svg"
+            install -m 644 assets/icon.png "$PKG/usr/share/icons/hicolor/256x256/apps/zenhush.png"
+            printf '%s\n' \
+              '[Desktop Entry]' \
+              'Type=Application' \
+              'Name=Zenhush' \
+              'GenericName=Focus Audio Machine' \
+              'Comment=Top-bar focus soundscapes & local audio loop' \
+              'Exec=/usr/bin/zenhush --toggle' \
+              'Icon=zenhush' \
+              'Terminal=false' \
+              'Categories=AudioVideo;Audio;' \
+              'StartupNotify=true' \
+              'StartupWMClass=zenhush' \
+              > "$PKG/usr/share/applications/zenhush.desktop"
+            desktop-file-validate "$PKG/usr/share/applications/zenhush.desktop"
+            printf '%s\n' \
+              'Package: zenhush' \
+              "Version: ${VER}" \
+              'Section: sound' \
+              'Priority: optional' \
+              'Architecture: amd64' \
+              'Maintainer: Zenhush Contributors' \
+              'Depends: libasound2 | libasound2t64, libxkbcommon0' \
+              'Description: Minimal top-bar focus soundscapes & local audio loop' \
+              > "$PKG/DEBIAN/control"
+            dpkg-deb --build --root-owner-group "$PKG" "dist/zenhush_${VER}_amd64.deb"
+            rm -rf "$PKG"
           fi
       - uses: actions/upload-artifact@v4
         with:

@@ -86,7 +86,10 @@ impl ZenhushUiApp {
             has_played: false,
             is_file_mode: settings.active_is_file || settings.locked_default_file.is_some(),
             active_sound: settings.active_sound,
-            active_file: settings.locked_default_file.clone().or(settings.active_file),
+            active_file: settings
+                .locked_default_file
+                .clone()
+                .or(settings.active_file),
             locked_default_file: settings.locked_default_file,
             local_tracks: settings.local_tracks,
             file_tone: settings.file_tone,
@@ -159,7 +162,7 @@ impl ZenhushUiApp {
                     if self.snap.picking_file && !s.picking_file {
                         self.suppress_hide_until = Instant::now() + Duration::from_millis(500);
                     }
-                    self.snap = s;
+                    self.snap = *s;
                 }
                 CoreToUi::Focus => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -172,8 +175,7 @@ impl ZenhushUiApp {
     }
 
     fn is_locked_default(&self) -> bool {
-        self.snap.active_file.is_some()
-            && self.snap.active_file == self.snap.locked_default_file
+        self.snap.active_file.is_some() && self.snap.active_file == self.snap.locked_default_file
     }
 
     fn active_track_title(&self) -> String {
@@ -207,7 +209,11 @@ impl ZenhushUiApp {
                 "ready to focus".to_string()
             };
         }
-        let state = if self.snap.playing { "playing" } else { "paused" };
+        let state = if self.snap.playing {
+            "playing"
+        } else {
+            "paused"
+        };
         if self.snap.is_file_mode {
             if self.is_locked_default() {
                 format!("locked default · {}", state)
@@ -414,11 +420,7 @@ impl ZenhushUiApp {
     }
 
     fn render_card(&mut self, ctx: &egui::Context, theme: Theme) {
-        let card_radius = if use_curved_transparent() {
-            16.0
-        } else {
-            0.0
-        };
+        let card_radius = if use_curved_transparent() { 16.0 } else { 0.0 };
         let frame = egui::Frame::default()
             .fill(theme.card)
             .corner_radius(card_radius)
@@ -478,12 +480,14 @@ impl ZenhushUiApp {
                     if icon_button(
                         ui,
                         &mut self.icons,
-                        IconKind::Close,
-                        28.0,
-                        14,
-                        theme.subtext,
                         theme,
-                        close_tip,
+                        IconBtn {
+                            kind: IconKind::Close,
+                            size: 28.0,
+                            icon_px: 14,
+                            color: theme.subtext,
+                            tooltip: close_tip,
+                        },
                     ) {
                         self.close_popup(ctx);
                     }
@@ -495,15 +499,17 @@ impl ZenhushUiApp {
                     if icon_button(
                         ui,
                         &mut self.icons,
-                        IconKind::Pin,
-                        28.0,
-                        14,
-                        pin_color,
                         theme,
-                        if self.snap.pinned {
-                            "Unpin window (P)"
-                        } else {
-                            "Pin window open (P)"
+                        IconBtn {
+                            kind: IconKind::Pin,
+                            size: 28.0,
+                            icon_px: 14,
+                            color: pin_color,
+                            tooltip: if self.snap.pinned {
+                                "Unpin window (P)"
+                            } else {
+                                "Pin window open (P)"
+                            },
                         },
                     ) {
                         self.snap.pinned = !self.snap.pinned;
@@ -704,15 +710,17 @@ impl ZenhushUiApp {
                 if icon_button(
                     ui,
                     &mut self.icons,
-                    mute_kind,
-                    28.0,
-                    16,
-                    mute_col,
                     theme,
-                    if self.snap.muted {
-                        "Unmute audio (M)"
-                    } else {
-                        "Mute audio (M)"
+                    IconBtn {
+                        kind: mute_kind,
+                        size: 28.0,
+                        icon_px: 16,
+                        color: mute_col,
+                        tooltip: if self.snap.muted {
+                            "Unmute audio (M)"
+                        } else {
+                            "Mute audio (M)"
+                        },
                     },
                 ) {
                     self.send(UiCmd::ToggleMute);
@@ -964,12 +972,14 @@ impl ZenhushUiApp {
                         if icon_button(
                             ui,
                             &mut self.icons,
-                            IconKind::Close,
-                            24.0,
-                            12,
-                            theme.subtext,
                             theme,
-                            "Remove local track",
+                            IconBtn {
+                                kind: IconKind::Close,
+                                size: 24.0,
+                                icon_px: 12,
+                                color: theme.subtext,
+                                tooltip: "Remove local track",
+                            },
                         ) {
                             self.send(UiCmd::RemoveLocalTrack(file_path.clone()));
                         }
@@ -1098,17 +1108,16 @@ impl eframe::App for ZenhushUiApp {
     }
 }
 
-fn icon_button(
-    ui: &mut egui::Ui,
-    icons: &mut IconCache,
+struct IconBtn<'a> {
     kind: IconKind,
     size: f32,
     icon_px: u32,
     color: Color32,
-    theme: Theme,
-    tooltip: &str,
-) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    tooltip: &'a str,
+}
+
+fn icon_button(ui: &mut egui::Ui, icons: &mut IconCache, theme: Theme, spec: IconBtn<'_>) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(spec.size), Sense::click());
     let bg = if resp.is_pointer_button_down_on() {
         theme.pressed.gamma_multiply(0.35)
     } else if resp.hovered() {
@@ -1128,13 +1137,13 @@ fn icon_button(
             egui::StrokeKind::Inside,
         );
     }
-    if let Some(tex) = icons.texture(ui.ctx(), kind, color, icon_px) {
+    if let Some(tex) = icons.texture(ui.ctx(), spec.kind, spec.color, spec.icon_px) {
         p.image(
             tex.id(),
-            Rect::from_center_size(rect.center(), Vec2::splat(icon_px as f32)),
+            Rect::from_center_size(rect.center(), Vec2::splat(spec.icon_px as f32)),
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             Color32::WHITE,
         );
     }
-    resp.on_hover_text(tooltip).clicked()
+    resp.on_hover_text(spec.tooltip).clicked()
 }

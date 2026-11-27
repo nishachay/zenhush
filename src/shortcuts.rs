@@ -204,7 +204,13 @@ fn write_icons_and_refresh_cache(data_dir: &std::path::Path) -> Result<(), Strin
         let _ = fs::remove_file(&dir_legacy_128);
     }
 
-    for dir in [&hicolor, &hicolor.join("256x256"), &dir_256, &hicolor.join("scalable"), &dir_svg] {
+    for dir in [
+        &hicolor,
+        &hicolor.join("256x256"),
+        &dir_256,
+        &hicolor.join("scalable"),
+        &dir_svg,
+    ] {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o755));
     }
@@ -300,21 +306,39 @@ pub fn install_desktop_entry() -> Result<PathBuf, String> {
 }
 
 #[cfg(target_os = "linux")]
+fn stop_running_instance_before_file_change() {
+    if crate::ipc::try_send_to_existing(crate::ipc::RemoteCmd::Quit) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(900);
+        while crate::ipc::InstanceLock::is_locked("zenhush-daemon")
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 pub fn install_to_user_local() -> Result<String, String> {
+    stop_running_instance_before_file_change();
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let home = dirs::home_dir().ok_or("No home directory")?;
     let bin_dir = home.join(".local").join("bin");
     fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
     let target_bin = bin_dir.join("zenhush");
     if exe != target_bin {
-        fs::copy(&exe, &target_bin).map_err(|e| format!("Failed copying binary: {}", e))?;
+        let tmp_bin = bin_dir.join(format!(".zenhush.tmp.{}", std::process::id()));
+        fs::copy(&exe, &tmp_bin).map_err(|e| format!("Failed copying binary: {}", e))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&target_bin).map_err(|e| e.to_string())?.permissions();
+            let mut perms = fs::metadata(&tmp_bin)
+                .map_err(|e| e.to_string())?
+                .permissions();
             perms.set_mode(0o755);
-            fs::set_permissions(&target_bin, perms).map_err(|e| e.to_string())?;
+            fs::set_permissions(&tmp_bin, perms).map_err(|e| e.to_string())?;
         }
+        fs::rename(&tmp_bin, &target_bin)
+            .map_err(|e| format!("Failed installing binary atomically: {}", e))?;
     }
 
     let data_dir = dirs::data_local_dir().ok_or("No local data dir")?;
@@ -339,6 +363,7 @@ pub fn install_to_user_local() -> Result<String, String> {
 
 #[cfg(target_os = "linux")]
 pub fn uninstall_from_user_local() -> Result<String, String> {
+    stop_running_instance_before_file_change();
     let home = dirs::home_dir().ok_or("No home directory")?;
     let bin = home.join(".local").join("bin").join("zenhush");
     if bin.exists() {
@@ -349,6 +374,7 @@ pub fn uninstall_from_user_local() -> Result<String, String> {
             let _ = fs::remove_file(&auto);
         }
     }
+    let _ = crate::gnome_ext::uninstall_gnome_pill();
     if let Some(data_dir) = dirs::data_local_dir() {
         let apps = data_dir.join("applications");
         let desktop = apps.join("zenhush.desktop");
@@ -378,7 +404,10 @@ pub fn uninstall_from_user_local() -> Result<String, String> {
             .stderr(std::process::Stdio::null())
             .status();
     }
-    Ok("Removed ~/.local/bin/zenhush, desktop launcher, icon, and autostart".to_string())
+    Ok(
+        "Removed ~/.local/bin/zenhush, desktop launcher, icon, autostart, and GNOME extension"
+            .to_string(),
+    )
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -390,7 +419,11 @@ pub fn uninstall_from_user_local() -> Result<String, String> {
 pub fn to_gnome_accel(shortcut: &str) -> String {
     let mut mods = String::new();
     let mut key = String::new();
-    for part in shortcut.split('+').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    for part in shortcut
+        .split('+')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         match part.to_uppercase().as_str() {
             "ALT" | "OPTION" => mods.push_str("<Alt>"),
             "CTRL" | "CONTROL" => mods.push_str("<Control>"),
@@ -409,8 +442,10 @@ pub fn register_gnome_shortcuts(toggle_shortcut: &str, play_shortcut: &str) -> R
     let _ = install_desktop_entry();
     let exe = current_exe_cmd();
 
-    let toggle_path = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zenhush-toggle/";
-    let play_path = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zenhush-play/";
+    let toggle_path =
+        "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zenhush-toggle/";
+    let play_path =
+        "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zenhush-play/";
 
     // Read existing custom-keybindings array
     let existing_out = Command::new("gsettings")
@@ -490,7 +525,10 @@ pub fn register_gnome_shortcuts(toggle_shortcut: &str, play_shortcut: &str) -> R
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn register_gnome_shortcuts(_toggle_shortcut: &str, _play_shortcut: &str) -> Result<(), String> {
+pub fn register_gnome_shortcuts(
+    _toggle_shortcut: &str,
+    _play_shortcut: &str,
+) -> Result<(), String> {
     Err("GNOME keybindings are Linux-only".into())
 }
 

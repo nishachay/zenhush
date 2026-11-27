@@ -65,8 +65,8 @@ pub fn run_daemon(open_ui_on_start: bool) {
     let bridge = BridgeServer::start(Some(main_thread.clone()));
     let mut settings = settings::load();
 
-    // Auto-install/upgrade native GNOME Top-Bar Popover extension on GNOME desktops
-    if shortcuts::is_gnome() {
+    // Auto-install/upgrade native GNOME Top-Bar Popover extension unless user opted out
+    if shortcuts::is_gnome() && !settings.gnome_pill_opted_out {
         gnome_ext::ensure_installed_and_enabled();
     }
     let gnome_popover_active = gnome_ext::is_active();
@@ -183,6 +183,7 @@ pub fn run_daemon(open_ui_on_start: bool) {
         pinned: settings.pinned,
         auto_play_on_launch: settings.auto_play_on_launch,
         start_in_background: settings.start_in_background,
+        gnome_pill_opted_out: settings.gnome_pill_opted_out,
         autostart_enabled: shortcuts::is_autostart_enabled(),
         gnome_pill_installed: gnome_ext::is_installed(),
         gnome_popover_active,
@@ -228,7 +229,11 @@ pub fn run_daemon(open_ui_on_start: bool) {
         core.tick();
         core.sync_outputs();
 
-        let ui_connected = core.bridge.as_ref().map(|b| b.has_client()).unwrap_or(false);
+        let ui_connected = core
+            .bridge
+            .as_ref()
+            .map(|b| b.has_client())
+            .unwrap_or(false);
         if ui_connected {
             core.ui_was_connected = true;
             core.push_snapshot_if_needed();
@@ -307,6 +312,7 @@ struct Core {
     pinned: bool,
     auto_play_on_launch: bool,
     start_in_background: bool,
+    gnome_pill_opted_out: bool,
     autostart_enabled: bool,
     gnome_pill_installed: bool,
     gnome_popover_active: bool,
@@ -398,6 +404,7 @@ impl Core {
             pinned: self.pinned,
             auto_play_on_launch: self.auto_play_on_launch,
             start_in_background: self.start_in_background,
+            gnome_pill_opted_out: self.gnome_pill_opted_out,
             global_shortcut_toggle: self.global_shortcut_toggle.clone(),
             global_shortcut_play: self.global_shortcut_play.clone(),
         };
@@ -414,7 +421,10 @@ impl Core {
 
     fn ui_is_open(&mut self) -> bool {
         self.reap_ui_child();
-        self.bridge.as_ref().map(|b| b.has_client()).unwrap_or(false)
+        self.bridge
+            .as_ref()
+            .map(|b| b.has_client())
+            .unwrap_or(false)
             || self.ui_child.is_some()
             || crate::ipc::InstanceLock::is_locked("zenhush-ui")
     }
@@ -749,7 +759,8 @@ impl Core {
                     self.timer_remaining = Some(rem);
                     let secs_left = rem.as_secs_f32();
                     if secs_left <= 3.0 {
-                        self.audio.set_master_fade((secs_left / 3.0).clamp(0.0, 1.0));
+                        self.audio
+                            .set_master_fade((secs_left / 3.0).clamp(0.0, 1.0));
                     }
                 }
             }
@@ -1089,15 +1100,18 @@ impl Core {
                     Err(e) => self.set_notice(e, true),
                 },
                 UiCmd::ToggleGnomePill => {
-                    let res = if gnome_ext::is_installed() {
-                        gnome_ext::uninstall_gnome_pill()
-                    } else {
+                    let installing = !gnome_ext::is_installed();
+                    let res = if installing {
                         gnome_ext::install_gnome_pill()
+                    } else {
+                        gnome_ext::uninstall_gnome_pill()
                     };
                     match res {
                         Ok(msg) => {
+                            self.gnome_pill_opted_out = !installing;
                             self.gnome_pill_installed = gnome_ext::is_installed();
                             self.gnome_popover_active = gnome_ext::is_active();
+                            self.save_settings();
                             self.set_notice(msg, false);
                         }
                         Err(e) => self.set_notice(e, true),
@@ -1167,7 +1181,11 @@ impl Core {
                 timer_label,
                 notch_mode: self.window_mode == WindowMode::NotchPill,
                 pinned: self.pinned,
-                visible: self.bridge.as_ref().map(|b| b.has_client()).unwrap_or(false),
+                visible: self
+                    .bridge
+                    .as_ref()
+                    .map(|b| b.has_client())
+                    .unwrap_or(false),
                 tooltip,
             });
         }
@@ -1276,7 +1294,7 @@ impl Core {
         if should_push {
             self.last_rms_push = Instant::now();
             self.last_pushed_snap = Some(next.clone());
-            b.send(&CoreToUi::Snapshot(next));
+            b.send(&CoreToUi::Snapshot(Box::new(next)));
         }
     }
 }

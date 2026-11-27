@@ -171,10 +171,7 @@ mod linux {
                 "xesam:artist".to_string(),
                 Value::from(vec!["Zenhush".to_string()]),
             );
-            m.insert(
-                "xesam:album".to_string(),
-                Value::from(st.subtitle.clone()),
-            );
+            m.insert("xesam:album".to_string(), Value::from(st.subtitle.clone()));
             m
         }
 
@@ -463,8 +460,8 @@ mod linux {
                 .object_server()
                 .interface::<_, ControlIface>("/org/mpris/MediaPlayer2")
             {
-                let emitter = SignalEmitter::from(iface_ref.signal_emitter().clone());
-                let _ = zbus::block_on(async {
+                let emitter = iface_ref.signal_emitter().clone();
+                zbus::block_on(async {
                     let _ = ControlIface::toggle_popover(&emitter).await;
                 });
             }
@@ -477,8 +474,7 @@ mod linux {
             if *prev == *next {
                 return;
             }
-            let status_changed =
-                prev.playing != next.playing || prev.has_played != next.has_played;
+            let status_changed = prev.playing != next.playing || prev.has_played != next.has_played;
             let meta_changed = prev.title != next.title || prev.subtitle != next.subtitle;
             let vol_changed = prev.volume != next.volume || prev.muted != next.muted;
             *prev = next.clone();
@@ -508,9 +504,9 @@ mod linux {
                     .object_server()
                     .interface::<_, PlayerIface>("/org/mpris/MediaPlayer2")
                 {
-                    let emitter = SignalEmitter::from(iface_ref.signal_emitter().clone());
+                    let emitter = iface_ref.signal_emitter().clone();
                     let player = iface_ref.get();
-                    let _ = zbus::block_on(async {
+                    zbus::block_on(async {
                         if status_changed {
                             let _ = player.playback_status_changed(&emitter).await;
                         }
@@ -530,9 +526,9 @@ mod linux {
                     .object_server()
                     .interface::<_, ControlIface>("/org/mpris/MediaPlayer2")
                 {
-                    let emitter = SignalEmitter::from(iface_ref.signal_emitter().clone());
+                    let emitter = iface_ref.signal_emitter().clone();
                     let ctrl = iface_ref.get();
-                    let _ = zbus::block_on(async {
+                    zbus::block_on(async {
                         let _ = ctrl.state_json_changed(&emitter).await;
                     });
                 }
@@ -590,7 +586,10 @@ mod fallback {
 
     pub struct MprisServer;
     impl MprisServer {
-        pub fn start(_tx: Sender<MprisCmd>, _wake: Option<Arc<std::thread::Thread>>) -> Option<Self> {
+        pub fn start(
+            _tx: Sender<MprisCmd>,
+            _wake: Option<Arc<std::thread::Thread>>,
+        ) -> Option<Self> {
             None
         }
         pub fn emit_toggle_popover(&self) {}
@@ -598,7 +597,7 @@ mod fallback {
     }
 }
 
-#[cfg(target_os = "linux")]
-pub use linux::{MprisCmd, MprisServer, MprisState};
 #[cfg(not(target_os = "linux"))]
 pub use fallback::{MprisCmd, MprisServer, MprisState};
+#[cfg(target_os = "linux")]
+pub use linux::{MprisCmd, MprisServer, MprisState};

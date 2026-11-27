@@ -2,22 +2,22 @@
 
 **A minimal, fast focus audio app that lives right inside your top bar.**
 
-Click the icon in your GNOME top bar to play/pause, pick a focus soundscape, drag volume (or scroll right on the top-bar icon), set a sleep timer, or lock your favorite local audio file as your startup default — with zero floating window clutter and ~0% idle CPU.
+Click Zenhush in your GNOME top bar to play/pause, pick a focus soundscape, adjust volume, set a sleep timer, or pin a local audio track as your startup default — with zero floating window clutter and ~0% idle CPU.
 
 ---
 
 ## Features
 
 - **Lives in Your Top Bar (Native GNOME Popover)**:
-  - No separate floating window getting in the way: clicking Zenhush in the GNOME top panel drops open the clean native popover directly below the icon.
-  - **Middle-click** the top-bar icon to Play/Pause instantly; **scroll wheel** right on the icon to adjust volume.
-  - Zero OpenGL/GPU window overhead when using the top-bar popover (keeps your laptop cool and silent).
-  - Includes a clean lightweight fallback popup card for macOS, Windows, and non-GNOME Linux desktops.
+  - No separate floating window getting in the way: clicking Zenhush in the GNOME top bar drops open the native popover directly below the pill.
+  - **Middle-click** the top-bar pill to Play/Pause instantly.
+  - Zero OpenGL/GPU window overhead when using the GNOME top-bar popover.
+  - Includes a crisp content-fit floating card (`336 px` wide) on macOS, Windows, non-GNOME Linux desktops, and first-run GNOME before session activation.
 - **8 Endless Stereo Soundscapes** (100% procedural on-device, zero network):
   - **Brown**, **Pink**, **White**, **Rain**, **Ocean**, **Fire**, **Forest**, **Focus**.
-- **Your Audio File & Lock as Default**:
-  - Choose any `.wav`, `.mp3`, `.flac`, `.ogg`, or `.m4a` file (streaming decoder, < 1 MB RAM, instant start, seamless loop crossfade).
-  - One click on **Lock** pins your track as Zenhush's startup default.
+- **Your Audio File & Startup Default Lock**:
+  - Choose or drop any `.wav`, `.mp3`, `.flac`, `.ogg`, or `.m4a` file (streaming decoder, seamless loop crossfade, automatically remembered across launches).
+  - One click on **Default** locks it so Zenhush always starts with your chosen track even after playing built-in sounds.
 - **Sleep Timer**:
   - One-tap cycle (`Off → 25m → 45m → 60m → 90m`) with gentle 3-second fade-out.
 - **Hardware Media Keys & MPRIS2**:
@@ -25,15 +25,19 @@ Click the icon in your GNOME top bar to play/pause, pick a focus soundscape, dra
 
 ## Install & Run
 
-### Download Binary (Recommended)
+### Download Release (Recommended)
 
-1. Download the latest release binary from [Releases](https://github.com/nishachay/zenhush/releases/latest) (`zenhush-linux-x86_64`, `zenhush-macos`, or `zenhush-windows-x86_64.exe`).
-2. On Linux: mark executable (`chmod +x zenhush-linux-x86_64`) and run:
+1. Download the latest binaries (or Debian/Ubuntu `.deb` package) and verify integrity with `SHA256SUMS.txt` from [Releases](https://github.com/nishachay/zenhush/releases/latest).
+2. **Ubuntu / Debian (`.deb`)**:
    ```sh
-   ./zenhush-linux-x86_64 --install
+   sudo apt install ./zenhush_*_amd64.deb
    ```
-   This installs Zenhush to `~/.local/bin/zenhush` and adds it to your app launcher.
-3. Launch **Zenhush** from your app menu. On Ubuntu/GNOME, Zenhush automatically installs its Top-Bar Popover extension (`zenhush@zenhush.app`) — log out and back in once if prompted so it snaps directly into the top panel.
+3. **Standalone Linux binary**:
+   ```sh
+   sha256sum -c SHA256SUMS.txt --ignore-missing
+   chmod +x zenhush-linux-x86_64 && ./zenhush-linux-x86_64 --install
+   ```
+   This installs Zenhush to `~/.local/bin/zenhush`, creates the `.desktop` entry, and refreshes the XDG icon cache. On GNOME Wayland, log out & back in once if prompted so the native top-bar popover activates.
 
 ### Build from Source
 
@@ -45,18 +49,19 @@ cargo build --release --locked
 ./target/release/zenhush --install
 ```
 
-*(To uninstall later: `zenhush --uninstall && zenhush --uninstall-gnome-pill`.)*
+*(To uninstall completely: `zenhush --uninstall`.)*
 
 ## CLI Controls
 
 ```sh
-zenhush --background   # Start silently in the top bar (~15 MB RSS, 0% idle CPU)
-zenhush --toggle       # Toggle top-bar popover / popup
+zenhush --background   # Start silently in the top bar / tray (~15 MB RAM)
+zenhush --toggle       # Toggle top-bar popover / card
 zenhush --play-pause   # Play / Pause
 zenhush --next         # Next sound
 zenhush --prev         # Previous sound
 zenhush --vol-up       # Volume +5%
 zenhush --vol-down     # Volume -5%
 zenhush --mute         # Mute / Unmute
+zenhush --version      # Print version
 zenhush --quit         # Quit running instance
 ```

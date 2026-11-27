@@ -52,6 +52,28 @@ fn load_app_icon() -> Option<egui::IconData> {
     })
 }
 
+fn open_daemon_log_stderr() -> Stdio {
+    let base = dirs::state_dir()
+        .or_else(dirs::data_local_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("zenhush");
+    if std::fs::create_dir_all(&base).is_err() {
+        return Stdio::null();
+    }
+    let log_path = base.join("zenhush.log");
+    if let Ok(meta) = std::fs::metadata(&log_path) {
+        if meta.len() > 262_144 {
+            let _ = std::fs::rename(&log_path, base.join("zenhush.log.1"));
+        }
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null())
+}
+
 fn spawn_background_daemon() -> bool {
     let Ok(exe) = std::env::current_exe() else {
         return false;
@@ -60,7 +82,7 @@ fn spawn_background_daemon() -> bool {
     cmd.arg("--daemon")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(open_daemon_log_stderr());
     if cmd.spawn().is_err() {
         return false;
     }
@@ -184,6 +206,10 @@ fn run_ui_window() {
 
 fn main() {
     let cli = ipc::parse_cli();
+    if cli.version_requested {
+        println!("zenhush {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     if cli.help_requested {
         ipc::print_help();
         return;
@@ -209,6 +235,9 @@ fn main() {
         return;
     }
     if cli.install_gnome_pill {
+        let mut s = settings::load();
+        s.gnome_pill_opted_out = false;
+        settings::save(&s);
         match gnome_ext::install_gnome_pill() {
             Ok(msg) => println!("{}", msg),
             Err(e) => {
@@ -219,6 +248,9 @@ fn main() {
         return;
     }
     if cli.uninstall_gnome_pill {
+        let mut s = settings::load();
+        s.gnome_pill_opted_out = true;
+        settings::save(&s);
         match gnome_ext::uninstall_gnome_pill() {
             Ok(msg) => println!("{}", msg),
             Err(e) => {
@@ -265,12 +297,12 @@ fn main() {
         return;
     }
 
-    // Fresh launch: install GNOME extension if on GNOME, start background core,
+    // Fresh launch: load settings, install GNOME extension if opted-in, start background core,
     // and open either the native GNOME Top-Bar Popover or the lightweight fallback card.
-    if shortcuts::is_gnome() {
+    let loaded = settings::load();
+    if shortcuts::is_gnome() && !loaded.gnome_pill_opted_out {
         gnome_ext::ensure_installed_and_enabled();
     }
-    let loaded = settings::load();
     if loaded.start_in_background {
         daemon::run_daemon(false);
     } else if spawn_background_daemon() {

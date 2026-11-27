@@ -46,7 +46,12 @@ pub fn probe_file(path: &Path) -> Result<TrackProbe, String> {
     }
 
     let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
         .map_err(|e| format!("Unsupported or unreadable file ({})", e))?;
 
     let track = probed
@@ -170,7 +175,14 @@ impl FileStreamHandle {
     }
 }
 
-fn open_format(path: &Path) -> Option<(Box<dyn symphonia::core::formats::FormatReader>, u32, Box<dyn symphonia::core::codecs::Decoder>, symphonia::core::codecs::CodecParameters)> {
+type OpenedAudio = (
+    Box<dyn symphonia::core::formats::FormatReader>,
+    u32,
+    Box<dyn symphonia::core::codecs::Decoder>,
+    symphonia::core::codecs::CodecParameters,
+);
+
+fn open_format(path: &Path) -> Option<OpenedAudio> {
     let file = File::open(path).ok()?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -178,7 +190,12 @@ fn open_format(path: &Path) -> Option<(Box<dyn symphonia::core::formats::FormatR
         hint.with_extension(ext);
     }
     let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
         .ok()?;
     let format = probed.format;
     let track = format.default_track()?;
@@ -290,7 +307,10 @@ fn decoder_loop(
                 .seek(
                     SeekMode::Accurate,
                     SeekTo::Time {
-                        time: Time { seconds: 0, frac: 0.0 },
+                        time: Time {
+                            seconds: 0,
+                            frac: 0.0,
+                        },
                         track_id: Some(track_id),
                     },
                 )
@@ -318,7 +338,10 @@ fn decoder_loop(
                     .seek(
                         SeekMode::Accurate,
                         SeekTo::Time {
-                            time: Time { seconds: 0, frac: 0.0 },
+                            time: Time {
+                                seconds: 0,
+                                frac: 0.0,
+                            },
                             track_id: Some(track_id),
                         },
                     )
@@ -339,8 +362,8 @@ fn decoder_loop(
                 continue;
             }
             Err(Error::ResetRequired) => {
-                if let Ok(d) = symphonia::default::get_codecs()
-                    .make(&params, &DecoderOptions::default())
+                if let Ok(d) =
+                    symphonia::default::get_codecs().make(&params, &DecoderOptions::default())
                 {
                     decoder = d;
                 }
@@ -467,7 +490,11 @@ mod tests {
             let frame = reader.next_frame();
             max_amp = max_amp.max(frame[0].abs()).max(frame[1].abs());
         }
-        assert!(max_amp > 0.2, "streamed audio amplitude too low: {}", max_amp);
+        assert!(
+            max_amp > 0.2,
+            "streamed audio amplitude too low: {}",
+            max_amp
+        );
         let _ = std::fs::remove_file(&tmp);
     }
 }

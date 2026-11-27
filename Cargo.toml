@@ -1,6 +1,6 @@
 [package]
 name = "zenhush"
-version = "2.0.0"
+version = "1.2.5"
 edition = "2021"
 description = "Zenhush — lightweight top-bar & notch focus audio machine (live stereo soundscapes, atmosphere layering, locked local tracks)"
 license = "MIT"

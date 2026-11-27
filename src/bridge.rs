@@ -58,7 +58,7 @@ pub struct UiSnapshot {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CoreToUi {
-    Snapshot(UiSnapshot),
+    Snapshot(Box<UiSnapshot>),
     Focus,
     Close,
 }
@@ -156,17 +156,23 @@ pub struct BridgeServer {
 impl BridgeServer {
     pub fn start(wake: Option<Arc<std::thread::Thread>>) -> Option<Self> {
         let (cmd_tx, cmd_rx) = channel::<UiCmd>();
-        let active_writer: Arc<Mutex<Option<Box<dyn Write + Send>>>> =
-            Arc::new(Mutex::new(None));
+        let active_writer: Arc<Mutex<Option<Box<dyn Write + Send>>>> = Arc::new(Mutex::new(None));
 
         #[cfg(unix)]
         {
             use std::os::unix::net::UnixListener;
             let path = bridge_socket_path();
             if path.exists() {
+                if std::os::unix::net::UnixStream::connect(&path).is_ok() {
+                    return None;
+                }
                 let _ = std::fs::remove_file(&path);
             }
             let listener = UnixListener::bind(&path).ok()?;
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
             let writer_slot = active_writer.clone();
             let _ = thread::Builder::new()
                 .name("zenhush-ui-bridge".into())

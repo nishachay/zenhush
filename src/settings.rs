@@ -21,18 +21,6 @@ pub enum ThemeMode {
     Dark,
 }
 
-impl ThemeMode {
-    pub const ALL: [ThemeMode; 3] = [ThemeMode::Auto, ThemeMode::Light, ThemeMode::Dark];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            ThemeMode::Auto => "Auto",
-            ThemeMode::Light => "Light",
-            ThemeMode::Dark => "Dark",
-        }
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub enum WindowMode {
     #[default]
@@ -46,22 +34,6 @@ pub enum DockAnchor {
     TopCenter,
     TopRight,
     Free,
-}
-
-impl DockAnchor {
-    pub const ALL: [DockAnchor; 3] = [
-        DockAnchor::TopCenter,
-        DockAnchor::TopRight,
-        DockAnchor::Free,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            DockAnchor::TopCenter => "Top Notch",
-            DockAnchor::TopRight => "Top Bar",
-            DockAnchor::Free => "Draggable",
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +78,7 @@ pub struct Settings {
     pub pinned: bool,
     pub auto_play_on_launch: bool,
     pub start_in_background: bool,
+    pub gnome_pill_opted_out: bool,
 
     pub global_shortcut_toggle: String,
     pub global_shortcut_play: String,
@@ -136,6 +109,7 @@ impl Default for Settings {
             pinned: false,
             auto_play_on_launch: false,
             start_in_background: false,
+            gnome_pill_opted_out: false,
             global_shortcut_toggle: "Alt+Shift+Z".to_string(),
             global_shortcut_play: "Alt+Shift+Space".to_string(),
         }
@@ -160,11 +134,19 @@ pub fn save(settings: &Settings) {
     let Some(path) = settings_path() else {
         return;
     };
+    save_to_path(&path, settings);
+}
+
+fn save_to_path(path: &std::path::Path, settings: &Settings) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    if let Ok(text) = serde_json::to_string_pretty(settings) {
-        let _ = fs::write(&path, text);
+    let Ok(text) = serde_json::to_string_pretty(settings) else {
+        return;
+    };
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    if fs::write(&tmp, text).is_ok() {
+        let _ = fs::rename(&tmp, path);
     }
 }
 
@@ -190,5 +172,22 @@ mod tests {
         assert_eq!(s.timer_minutes, 25);
         assert!(s.locked_default_file.is_none());
         assert_eq!(s.file_tone, FileTone::Original);
+    }
+
+    #[test]
+    fn atomic_save_roundtrips_cleanly() {
+        let dir = std::env::temp_dir().join(format!("zenhush-cfg-test-{}", std::process::id()));
+        let path = dir.join("settings.json");
+        let s = Settings {
+            volume: 42,
+            gnome_pill_opted_out: true,
+            ..Settings::default()
+        };
+        save_to_path(&path, &s);
+        let text = fs::read_to_string(&path).unwrap();
+        let loaded: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(loaded.volume, 42);
+        assert!(loaded.gnome_pill_opted_out);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

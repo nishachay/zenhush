@@ -68,6 +68,7 @@ pub struct CliArgs {
     pub daemon_mode: bool,
     pub command: Option<RemoteCmd>,
     pub help_requested: bool,
+    pub version_requested: bool,
     pub install_requested: bool,
     pub uninstall_requested: bool,
     pub install_gnome_pill: bool,
@@ -80,6 +81,7 @@ pub fn parse_cli() -> CliArgs {
     let mut daemon_mode = false;
     let mut command = None;
     let mut help_requested = false;
+    let mut version_requested = false;
     let mut install_requested = false;
     let mut uninstall_requested = false;
     let mut install_gnome_pill = false;
@@ -106,6 +108,7 @@ pub fn parse_cli() -> CliArgs {
             "--uninstall" => uninstall_requested = true,
             "--install-gnome-pill" => install_gnome_pill = true,
             "--uninstall-gnome-pill" => uninstall_gnome_pill = true,
+            "--version" | "-V" => version_requested = true,
             "--help" | "-h" => help_requested = true,
             _ => {}
         }
@@ -117,6 +120,7 @@ pub fn parse_cli() -> CliArgs {
         daemon_mode,
         command,
         help_requested,
+        version_requested,
         install_requested,
         uninstall_requested,
         install_gnome_pill,
@@ -126,7 +130,7 @@ pub fn parse_cli() -> CliArgs {
 
 pub fn print_help() {
     println!(
-        "Zenhush — lightweight focus audio machine\n\n\
+        "Zenhush {} — lightweight focus audio machine\n\n\
         Usage: zenhush [OPTIONS]\n\n\
         Options:\n\
           -b, --background           Start silently in the top bar / tray (~15 MB RAM)\n\
@@ -143,10 +147,12 @@ pub fn print_help() {
               --notch                Toggle compact Notch Pill mode\n\
               --quit                 Quit running instance\n\
               --install              Install binary, app launcher & icon to ~/.local\n\
-              --uninstall            Remove installed ~/.local binary, launcher & autostart\n\
-              --install-gnome-pill   Install optional GNOME Top-Bar Pill extension\n\
-              --uninstall-gnome-pill Remove GNOME Top-Bar Pill extension\n\
-          -h, --help                 Show this help"
+              --uninstall            Remove binary, launcher, icon, autostart & GNOME extension\n\
+              --install-gnome-pill   Install GNOME Top-Bar Popover extension\n\
+              --uninstall-gnome-pill Remove GNOME Top-Bar Popover extension\n\
+          -V, --version              Print version\n\
+          -h, --help                 Show this help",
+        env!("CARGO_PKG_VERSION")
     );
 }
 
@@ -279,6 +285,10 @@ impl IpcServer {
                 let _ = std::fs::remove_file(&path);
             }
             let listener = UnixListener::bind(&path).ok()?;
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
             let _ = thread::Builder::new()
                 .name("zenhush-ipc".into())
                 .spawn(move || {

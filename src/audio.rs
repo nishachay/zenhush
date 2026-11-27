@@ -15,8 +15,8 @@ use cpal::{Device, Stream, StreamConfig};
 
 use crate::filemode::{FileStreamHandle, FileStreamReader};
 use crate::synth::{
-    FileTone, Sound, Synth, DEFAULT_DEPTH, DEFAULT_LAYER_MIX, DEFAULT_RUMBLE,
-    DEFAULT_SAMPLE_RATE, DEFAULT_VOLUME,
+    FileTone, Sound, Synth, DEFAULT_DEPTH, DEFAULT_LAYER_MIX, DEFAULT_RUMBLE, DEFAULT_SAMPLE_RATE,
+    DEFAULT_VOLUME,
 };
 
 enum AudioCmd {
@@ -283,10 +283,7 @@ impl AudioEngine {
     /// Periodic maintenance: follow default output device hotplugs & suspend
     /// the audio stream once a pause fade-out finishes (0% idle CPU).
     pub fn maintain(&mut self) {
-        if !self.playing
-            && !self.stream_paused
-            && self.pause_fade_done.load(Ordering::Acquire)
-        {
+        if !self.playing && !self.stream_paused && self.pause_fade_done.load(Ordering::Acquire) {
             if let Some(stream) = &self.stream {
                 let _ = stream.pause();
                 self.stream_paused = true;
