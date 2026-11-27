@@ -49,6 +49,7 @@ pub struct UiSnapshot {
     pub autostart_enabled: bool,
     pub gnome_pill_installed: bool,
     pub gnome_popover_active: bool,
+    pub picking_file: bool,
     pub global_shortcut_toggle: String,
     pub global_shortcut_play: String,
     pub shortcut_status: String,
@@ -69,6 +70,9 @@ pub enum UiCmd {
     StepSound(i32),
     SelectSound(Sound),
     SelectFileMode,
+    PickFile {
+        lock_default: bool,
+    },
     AddLocalFile {
         path: PathBuf,
         play_now: bool,

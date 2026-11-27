@@ -15,14 +15,14 @@ mod linux {
     use zbus::zvariant::OwnedValue;
 
     const UUID: &str = "zenhush@zenhush.app";
-    const EXT_VERSION: u32 = 4;
+    const EXT_VERSION: u32 = 5;
 
     const METADATA_JSON: &str = r#"{
   "uuid": "zenhush@zenhush.app",
   "name": "Zenhush",
   "description": "Minimal focus audio player directly in your GNOME top bar.",
   "shell-version": ["45", "46", "47", "48", "49", "50", "51"],
-  "version": 4
+  "version": 5
 }
 "#;
 
@@ -372,22 +372,10 @@ class ZenhushIndicator extends PanelMenu.Button {
         this._pill.add_child(this._panelLabel);
         this.add_child(this._pill);
 
-        // Middle-click = instant Play/Pause; Scroll = Volume ±5%
+        // Middle-click = instant Play/Pause (no scroll-wheel volume jumps)
         this.connect('button-press-event', (_actor, event) => {
             if (event.get_button() === 2) {
                 this._callPlayer('PlayPause');
-                return Clutter.EVENT_STOP;
-            }
-            return Clutter.EVENT_PROPAGATE;
-        });
-        this.connect('scroll-event', (_actor, event) => {
-            const dir = event.get_scroll_direction();
-            let delta = 0;
-            if (dir === Clutter.ScrollDirection.UP) delta = 5;
-            else if (dir === Clutter.ScrollDirection.DOWN) delta = -5;
-            if (delta !== 0) {
-                const next = Math.max(0, Math.min(100, (this._state.volume ?? 70) + delta));
-                this._callCtrl('SetVolumePct', new GLib.Variant('(y)', [next]));
                 return Clutter.EVENT_STOP;
             }
             return Clutter.EVENT_PROPAGATE;
@@ -545,18 +533,6 @@ class ZenhushIndicator extends PanelMenu.Button {
             this._draggingVol = false;
             return Clutter.EVENT_PROPAGATE;
         });
-        this._volHit.connect('scroll-event', (_a, ev) => {
-            const dir = ev.get_scroll_direction();
-            let d = 0;
-            if (dir === Clutter.ScrollDirection.UP) d = 5;
-            else if (dir === Clutter.ScrollDirection.DOWN) d = -5;
-            if (d !== 0) {
-                const next = Math.max(0, Math.min(100, (this._state.volume ?? 70) + d));
-                this._callCtrl('SetVolumePct', new GLib.Variant('(y)', [next]));
-                return Clutter.EVENT_STOP;
-            }
-            return Clutter.EVENT_PROPAGATE;
-        });
 
         this._volPctLabel = new St.Label({
             text: '70%',
@@ -601,27 +577,41 @@ class ZenhushIndicator extends PanelMenu.Button {
         actRow.add_child(this._pickFileBtn);
         root.add_child(actRow);
 
-        // 5. Loaded Local File Strip (shown when a local file exists)
+        // 5. Local File & Lock Default Strip (always visible so Lock default is discoverable)
         this._fileRow = new St.BoxLayout({
             style_class: 'zenhush-file-row',
             x_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
         });
         this._fileSelectBtn = new St.Button({
-            label: 'Local Track',
+            label: 'No local track chosen',
             style_class: 'zenhush-file-name',
             can_focus: true,
             x_expand: true,
             x_align: Clutter.ActorAlign.START,
         });
-        this._fileSelectBtn.connect('clicked', () => this._callCtrl('SelectFile', null));
+        this._fileSelectBtn.connect('clicked', () => {
+            if (this._state.has_file) {
+                this._callCtrl('SelectFile', null);
+            } else {
+                this.menu.close();
+                this._callCtrl('PickFile', null);
+            }
+        });
 
         this._lockBtn = new St.Button({
             label: 'Lock default',
             style_class: 'zenhush-lock-pill',
             can_focus: true,
         });
-        this._lockBtn.connect('clicked', () => this._callCtrl('ToggleLockDefault', null));
+        this._lockBtn.connect('clicked', () => {
+            if (this._state.has_file) {
+                this._callCtrl('ToggleLockDefault', null);
+            } else {
+                this.menu.close();
+                this._callCtrl('PickAndLockFile', null);
+            }
+        });
 
         const clearIcon = new St.Icon({icon_name: 'window-close-symbolic', icon_size: 13});
         this._clearFileBtn = new St.Button({
@@ -748,8 +738,9 @@ class ZenhushIndicator extends PanelMenu.Button {
             this._timerBtn.style_class = 'zenhush-action-pill';
         }
 
-        // File row (recover full track name via tooltip if truncated)
-        this._fileRow.visible = Boolean(st.has_file);
+        // File row (always visible: lets user choose or lock default from launch)
+        this._fileRow.visible = true;
+        this._clearFileBtn.visible = Boolean(st.has_file);
         if (st.has_file) {
             this._fileRow.style_class = st.is_file ? 'zenhush-file-row active' : 'zenhush-file-row';
             const fullName = st.file_title || 'Local track';
@@ -758,6 +749,13 @@ class ZenhushIndicator extends PanelMenu.Button {
             this._fileSelectBtn.tooltip_text = `Play ${fullName}`;
             this._lockBtn.label = st.locked_default ? 'Locked ✓' : 'Lock default';
             this._lockBtn.style_class = st.locked_default ? 'zenhush-lock-pill locked' : 'zenhush-lock-pill';
+        } else {
+            this._fileRow.style_class = 'zenhush-file-row';
+            this._fileSelectBtn.label = 'No file chosen';
+            this._fileSelectBtn.has_tooltip = true;
+            this._fileSelectBtn.tooltip_text = 'Choose a local audio file';
+            this._lockBtn.label = 'Lock default';
+            this._lockBtn.style_class = 'zenhush-lock-pill';
         }
 
         // Footer

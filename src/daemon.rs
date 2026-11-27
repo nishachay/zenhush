@@ -134,7 +134,7 @@ pub fn run_daemon(open_ui_on_start: bool) {
     );
     let (mpris_tx, mpris_rx): (_, Receiver<MprisCmd>) = channel();
     let mpris = MprisServer::start(mpris_tx, Some(main_thread.clone()));
-    let (file_pick_tx, file_pick_rx) = channel::<PathBuf>();
+    let (file_pick_tx, file_pick_rx) = channel::<(PathBuf, bool)>();
 
     let mut core = Core {
         main_thread,
@@ -265,8 +265,8 @@ struct Core {
     bridge: Option<BridgeServer>,
     mpris: Option<MprisServer>,
     mpris_rx: Receiver<MprisCmd>,
-    file_pick_tx: Sender<PathBuf>,
-    file_pick_rx: Receiver<PathBuf>,
+    file_pick_tx: Sender<(PathBuf, bool)>,
+    file_pick_rx: Receiver<(PathBuf, bool)>,
     picking_file: Arc<AtomicBool>,
     shortcuts: ShortcutManager,
     ui_child: Option<Child>,
@@ -456,7 +456,7 @@ impl Core {
         }
     }
 
-    fn spawn_file_picker(&self) {
+    fn spawn_file_picker(&self, lock_default: bool) {
         if self.picking_file.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -470,19 +470,19 @@ impl Core {
                 .pick_file();
             flag.store(false, Ordering::Release);
             if let Some(path) = picked {
-                let _ = tx.send(path);
-                wake.unpark();
+                let _ = tx.send((path, lock_default));
             }
+            wake.unpark();
         });
     }
 
     fn process_picked_files(&mut self) {
-        let mut paths = Vec::new();
-        while let Ok(p) = self.file_pick_rx.try_recv() {
-            paths.push(p);
+        let mut items = Vec::new();
+        while let Ok(item) = self.file_pick_rx.try_recv() {
+            items.push(item);
         }
-        for p in paths {
-            self.add_local_file(p, true, false);
+        for (p, lock_default) in items {
+            self.add_local_file(p, true, lock_default);
         }
     }
 
@@ -490,7 +490,7 @@ impl Core {
         self.has_played = true;
         if self.is_file_mode {
             let Some(path) = self.active_file.clone() else {
-                self.spawn_file_picker();
+                self.spawn_file_picker(false);
                 return;
             };
             let handle = FileStreamHandle::new(path, self.loop_crossfade);
@@ -538,7 +538,7 @@ impl Core {
     fn restart_playback(&mut self) {
         self.has_played = true;
         if self.is_file_mode && self.active_file.is_none() {
-            self.spawn_file_picker();
+            self.spawn_file_picker(false);
             return;
         }
         if !self.audio.has_loaded_source() || self.audio.is_file() != self.is_file_mode {
@@ -567,7 +567,7 @@ impl Core {
             if let Some(first) = self.local_tracks.first().map(|t| t.path.clone()) {
                 self.active_file = Some(first);
             } else {
-                self.spawn_file_picker();
+                self.spawn_file_picker(false);
                 return;
             }
         }
@@ -843,7 +843,7 @@ impl Core {
                 TrayEvent::PrevSound => self.step_sound(-1),
                 TrayEvent::SelectSound(s) => self.select_live_sound(s),
                 TrayEvent::SelectFile => self.select_file_mode(),
-                TrayEvent::PickFile => self.spawn_file_picker(),
+                TrayEvent::PickFile => self.spawn_file_picker(false),
                 TrayEvent::ToggleLockDefault => {
                     if let Some(p) = self.active_file.clone() {
                         self.toggle_lock_for_path(&p);
@@ -851,11 +851,6 @@ impl Core {
                 }
                 TrayEvent::SetVolume(v) => {
                     self.audio.set_volume(v);
-                    self.save_settings();
-                }
-                TrayEvent::VolumeStep(delta) => {
-                    let next = (self.audio.volume() as i16 + delta as i16).clamp(0, 100) as u8;
-                    self.audio.set_volume(next);
                     self.save_settings();
                 }
                 TrayEvent::ToggleMute => {
@@ -901,7 +896,8 @@ impl Core {
                     }
                 }
                 MprisCmd::SelectFile => self.select_file_mode(),
-                MprisCmd::PickFile => self.spawn_file_picker(),
+                MprisCmd::PickFile => self.spawn_file_picker(false),
+                MprisCmd::PickAndLockFile => self.spawn_file_picker(true),
                 MprisCmd::ToggleLockDefault => {
                     if let Some(p) = self.active_file.clone() {
                         self.toggle_lock_for_path(&p);
@@ -951,6 +947,7 @@ impl Core {
                 UiCmd::StepSound(d) => self.step_sound(d),
                 UiCmd::SelectSound(s) => self.select_live_sound(s),
                 UiCmd::SelectFileMode => self.select_file_mode(),
+                UiCmd::PickFile { lock_default } => self.spawn_file_picker(lock_default),
                 UiCmd::AddLocalFile {
                     path,
                     play_now,
@@ -1223,6 +1220,7 @@ impl Core {
             autostart_enabled: self.autostart_enabled,
             gnome_pill_installed: self.gnome_pill_installed,
             gnome_popover_active: self.gnome_popover_active,
+            picking_file: self.picking_file.load(Ordering::Acquire),
             global_shortcut_toggle: self.global_shortcut_toggle.clone(),
             global_shortcut_play: self.global_shortcut_play.clone(),
             shortcut_status: self.shortcuts.status_note.clone(),

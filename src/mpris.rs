@@ -31,6 +31,7 @@ mod linux {
         SelectSound(u32),
         SelectFile,
         PickFile,
+        PickAndLockFile,
         ToggleLockDefault,
         RemoveFile,
         ToggleMute,
@@ -329,6 +330,10 @@ mod linux {
             self.send(MprisCmd::PickFile);
         }
 
+        fn pick_and_lock_file(&self) {
+            self.send(MprisCmd::PickAndLockFile);
+        }
+
         fn toggle_lock_default(&self) {
             self.send(MprisCmd::ToggleLockDefault);
         }
@@ -555,6 +560,7 @@ mod fallback {
         SelectSound(u32),
         SelectFile,
         PickFile,
+        PickAndLockFile,
         ToggleLockDefault,
         RemoveFile,
         ToggleMute,

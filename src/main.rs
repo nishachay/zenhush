@@ -85,23 +85,21 @@ fn run_ui_window() {
 
     let loaded = settings::load();
     let init_w = 312.0_f32;
-    let init_h = 306.0_f32;
+    let init_h = 354.0_f32;
+
+    let use_transparent =
+        cfg!(not(target_os = "linux")) || std::env::var_os("WAYLAND_DISPLAY").is_some();
 
     let mut viewport = egui::ViewportBuilder::default()
+        .with_app_id("zenhush")
         .with_inner_size([init_w, init_h])
-        .with_min_inner_size([260.0, 260.0])
-        .with_max_inner_size([360.0, 440.0])
+        .with_min_inner_size([280.0, 280.0])
+        .with_max_inner_size([360.0, 460.0])
         .with_decorations(false)
         .with_always_on_top()
         .with_resizable(false)
+        .with_transparent(use_transparent)
         .with_taskbar(false);
-
-    // Enable window transparency where composited reliably (macOS/Windows).
-    // On Linux Wayland/XWayland, opaque corners avoid black alpha-clipping glitches.
-    #[cfg(not(target_os = "linux"))]
-    {
-        viewport = viewport.with_transparent(true);
-    }
 
     if let Some(icon) = load_app_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));

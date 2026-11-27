@@ -23,7 +23,6 @@ pub enum TrayEvent {
     PickFile,
     ToggleLockDefault,
     SetVolume(u8),
-    VolumeStep(i8),
     ToggleMute,
     SetTimer(u32),
     Quit,
@@ -188,14 +187,6 @@ mod platform {
 
         fn secondary_activate(&mut self, _x: i32, _y: i32) {
             self.emit(TrayEvent::TogglePlay);
-        }
-
-        fn scroll(&mut self, delta: i32, _orientation: ksni::Orientation) {
-            if delta > 0 {
-                self.emit(TrayEvent::VolumeStep(5));
-            } else if delta < 0 {
-                self.emit(TrayEvent::VolumeStep(-5));
-            }
         }
 
         fn menu(&self) -> Vec<MenuItem<Self>> {
